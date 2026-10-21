@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import type { GeodeticPoint } from "@dron/shared";
+import { useEffect, useMemo, useState } from "react";
+import type { GeodeticPoint, LiveAlgebra, Mat3, Telemetry } from "@dron/shared";
+import { liveAlgebra, norm } from "@dron/shared";
 import { fmt, fmtInt, fmtVector } from "../format";
+import { DataTable } from "./DataTable";
 
 type Triple = readonly [number, number, number];
-type Matrix3 = readonly [Triple, Triple, Triple];
 
 interface PlanningSummary {
   buildings: number;
@@ -20,7 +21,7 @@ interface FramePayload {
   displacement: Triple;
   distanceMeters: number;
   bearingDeg: number;
-  enuRotation: Matrix3;
+  enuRotation: Mat3;
   academicScale: number;
   destinationAcademic: Triple;
 }
@@ -39,19 +40,13 @@ interface RouteResponse {
   };
 }
 
-const ALGEBRA_TOPICS: readonly { topic: string; detail: string; ready: boolean }[] = [
-  { topic: "Vectores", detail: "posición, desplazamiento y norma", ready: true },
-  { topic: "Recta paramétrica y cartesiana", detail: "L(t) = D + t·d", ready: true },
-  { topic: "Ecuación del plano", detail: "z = h y fachadas", ready: true },
-  { topic: "Producto interno y norma", detail: "ángulo con el norte", ready: true },
-  { topic: "Proyecciones ortogonales", detail: "P = diag(1, 1, 0)", ready: true },
-  { topic: "Espacios y subespacios", detail: "direcciones permitidas", ready: false },
-  { topic: "Espacio generado", detail: "span de la base", ready: false },
-  { topic: "Combinaciones lineales", detail: "dependencia e independencia", ready: false },
-  { topic: "Transformaciones lineales", detail: "T(x) = R·x en ENU", ready: true },
-  { topic: "Núcleo e imagen", detail: "ker(T) e Im(T)", ready: true },
-  { topic: "Matriz, rango e isomorfismos", detail: "det(R) = 1", ready: true },
+const IDENTITY: Mat3 = [
+  [1, 0, 0],
+  [0, 1, 0],
+  [0, 0, 1],
 ];
+
+const NORTH: Triple = [0, 1, 0];
 
 function RouteSketch({ east, north }: { east: number; north: number }) {
   const width = 380;
@@ -74,7 +69,12 @@ function RouteSketch({ east, north }: { east: number; north: number }) {
       aria-label="Esquema de la ruta en el plano ENU"
     >
       <defs>
-        <pattern id="grid-detail" width="22" height="22" patternUnits="userSpaceOnUse">
+        <pattern
+          id="grid-detail"
+          width="22"
+          height="22"
+          patternUnits="userSpaceOnUse"
+        >
           <path
             d="M 22 0 L 0 0 0 22"
             fill="none"
@@ -83,7 +83,13 @@ function RouteSketch({ east, north }: { east: number; north: number }) {
           />
         </pattern>
       </defs>
-      <rect x="0" y="0" width={width} height={height} fill="url(#grid-detail)" />
+      <rect
+        x="0"
+        y="0"
+        width={width}
+        height={height}
+        fill="url(#grid-detail)"
+      />
       <line
         x1={originX}
         y1={originY}
@@ -126,14 +132,118 @@ function RouteSketch({ east, north }: { east: number; north: number }) {
   );
 }
 
-export function DetailsSection() {
+interface Topic {
+  topic: string;
+  detail: string;
+  value: string;
+}
+
+function buildTopics(live: LiveAlgebra | null): Topic[] {
+  if (!live) {
+    return [
+      { topic: "Vectores", detail: "posición y norma", value: "—" },
+      {
+        topic: "Recta paramétrica y cartesiana",
+        detail: "L(t) = p + t·ĥ",
+        value: "—",
+      },
+      { topic: "Ecuación del plano", detail: "z = h del crucero", value: "—" },
+      { topic: "Producto interno y norma", detail: "v · n̂", value: "—" },
+      {
+        topic: "Proyecciones ortogonales",
+        detail: "P·p sobre z = 0",
+        value: "—",
+      },
+      {
+        topic: "Espacios y subespacios",
+        detail: "H = {v : v_z = 0}",
+        value: "—",
+      },
+      { topic: "Espacio generado", detail: "span{ĥ, r̂, k̂}", value: "—" },
+      {
+        topic: "Combinaciones lineales",
+        detail: "p = a·ĥ + b·r̂ + c·k̂",
+        value: "—",
+      },
+      { topic: "Transformaciones lineales", detail: "T(x) = R·x", value: "—" },
+      { topic: "Núcleo e imagen", detail: "ker P e Im P", value: "—" },
+      {
+        topic: "Matriz, rango e isomorfismo",
+        detail: "det(R) y base del crucero",
+        value: "—",
+      },
+    ];
+  }
+
+  return [
+    {
+      topic: "Vectores",
+      detail: "p = (x, y, z) y su norma",
+      value: `‖p‖ = ${fmt(live.distanceFromOrigin, 1)} m`,
+    },
+    {
+      topic: "Recta paramétrica y cartesiana",
+      detail: "L(t) = p + t·ĥ",
+      value: `ĥ = ${fmtVector(live.heading, 3)}`,
+    },
+    {
+      topic: "Ecuación del plano",
+      detail: "z = h del crucero",
+      value: `z = ${fmt(live.altitude, 1)} m`,
+    },
+    {
+      topic: "Producto interno y norma",
+      detail: "v · n̂ con n̂ = (0, 1, 0)",
+      value: `${fmt(live.northDot, 2)} m/s · rumbo ${fmt(live.bearingDeg, 1)}°`,
+    },
+    {
+      topic: "Proyecciones ortogonales",
+      detail: "P·p sobre z = 0",
+      value: fmtVector(live.ground, 1),
+    },
+    {
+      topic: "Espacios y subespacios",
+      detail: "H = {v : v_z = 0}",
+      value: "dim H = 2 · plano xy",
+    },
+    {
+      topic: "Espacio generado",
+      detail: "span{ĥ, r̂, k̂}",
+      value: `dim = ${live.directionsRank} · det = ${fmt(live.directionsDet, 3)}`,
+    },
+    {
+      topic: "Combinaciones lineales",
+      detail: "p = a·ĥ + b·r̂ + c·k̂",
+      value: `a = ${fmt(live.along, 1)} · b = ${fmt(live.lateral, 1)} · c = ${fmt(live.altitude, 1)}`,
+    },
+    {
+      topic: "Transformaciones lineales",
+      detail: "T(v) = R·v en ENU",
+      value: `‖R·v‖ = ${fmt(live.rotatedSpeed, 2)} m/s = ‖v‖`,
+    },
+    {
+      topic: "Núcleo e imagen",
+      detail: "ker P = ⟨k̂⟩ · Im P = plano xy",
+      value: "nulidad 1 · rango 2",
+    },
+    {
+      topic: "Matriz, rango e isomorfismo",
+      detail: "R ortonormal",
+      value: `rango ${live.rotationRank} · det ${fmt(live.rotationDet, 3)}`,
+    },
+  ];
+}
+
+export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
   const [frame, setFrame] = useState<FramePayload | null>(null);
   const [planning, setPlanning] = useState<PlanningSummary | null>(null);
 
   useEffect(() => {
     let active = true;
     fetch("/api/route")
-      .then((response) => (response.ok ? (response.json() as Promise<RouteResponse>) : null))
+      .then((response) =>
+        response.ok ? (response.json() as Promise<RouteResponse>) : null,
+      )
       .then((data) => {
         if (!active || !data) return;
         setPlanning({
@@ -170,105 +280,140 @@ export function DetailsSection() {
     };
   }, []);
 
-  const readyTopics = ALGEBRA_TOPICS.filter((topic) => topic.ready).length;
+  const live = useMemo(() => {
+    if (!telemetry) return null;
+    const fallback: Triple =
+      frame && norm([frame.displacement[0], frame.displacement[1], 0]) > 0
+        ? [frame.displacement[0], frame.displacement[1], 0]
+        : NORTH;
+    return liveAlgebra(
+      telemetry.position,
+      telemetry.velocity,
+      frame?.enuRotation ?? IDENTITY,
+      fallback,
+    );
+  }, [telemetry, frame]);
+
+  const topics = buildTopics(live);
 
   return (
-    <section className="details" aria-label="Modelo matemático">
-      <article className="card">
-        <div className="card-head">
-          <h2>Ruta real</h2>
-          <span className="chip">A* · {planning ? `${planning.cellSize} m` : "ENU"}</span>
-        </div>
-        <RouteSketch east={frame?.destinationEnu[0] ?? 0} north={frame?.destinationEnu[1] ?? 0} />
-        <dl className="facts">
-          <div>
-            <dt>Distancia</dt>
-            <dd className="mono">{frame ? `${fmt(frame.distanceMeters / 1000, 2)} km` : "—"}</dd>
+    <>
+      <section className="details" aria-label="Modelo matemático">
+        <article className="card">
+          <div className="card-head">
+            <h2>Ruta real</h2>
+            <span className="chip">
+              A* · {planning ? `${planning.cellSize} m` : "ENU"}
+            </span>
           </div>
-          <div>
-            <dt>Rumbo</dt>
-            <dd className="mono">{frame ? `${fmt(frame.bearingDeg, 2)}°` : "—"}</dd>
-          </div>
-          <div>
-            <dt>Escala académica</dt>
-            <dd className="mono">{frame ? `${fmt(frame.academicScale, 1)} m/u` : "—"}</dd>
-          </div>
-          <div>
-            <dt>Destino académico</dt>
-            <dd className="mono">{frame ? fmtVector(frame.destinationAcademic, 3) : "—"}</dd>
-          </div>
-          <div>
-            <dt>Edificios OSM</dt>
-            <dd className="mono">{planning ? fmtInt(planning.buildings) : "—"}</dd>
-          </div>
-          <div>
-            <dt>Bloquean el crucero</dt>
-            <dd className="mono">{planning ? fmtInt(planning.obstacleBuildings) : "—"}</dd>
-          </div>
-          <div>
-            <dt>Waypoints A*</dt>
-            <dd className="mono">
-              {planning
-                ? `${fmtInt(planning.waypoints)} · desvío ${fmt((planning.detourRatio - 1) * 100, 2)} %`
-                : "—"}
-            </dd>
-          </div>
-        </dl>
-      </article>
-
-      <article className="card">
-        <div className="card-head">
-          <h2>Matriz ENU</h2>
-          <span className="chip">T(x) = R·x</span>
-        </div>
-        <div className="matrix mono">
-          {(frame?.enuRotation ?? [
-            [1, 0, 0],
-            [0, 1, 0],
-            [0, 0, 1],
-          ]).map((row, rowIndex) => (
-            <div className="matrix-row" key={`row-${rowIndex}`}>
-              {row.map((value, columnIndex) => (
-                <span key={`cell-${rowIndex}-${columnIndex}`}>{fmt(value, 5)}</span>
-              ))}
+          <RouteSketch
+            east={frame?.destinationEnu[0] ?? 0}
+            north={frame?.destinationEnu[1] ?? 0}
+          />
+          <dl className="facts">
+            <div>
+              <dt>Distancia</dt>
+              <dd className="mono">
+                {frame ? `${fmt(frame.distanceMeters / 1000, 2)} km` : "—"}
+              </dd>
             </div>
-          ))}
-        </div>
-        <dl className="facts">
-          <div>
-            <dt>det(R)</dt>
-            <dd className="mono">1.00000</dd>
-          </div>
-          <div>
-            <dt>Rango</dt>
-            <dd className="mono">3</dd>
-          </div>
-          <div>
-            <dt>ker(R)</dt>
-            <dd className="mono">&#123;(0, 0, 0)&#125;</dd>
-          </div>
-        </dl>
-        <p className="card-foot">
-          Rotación ortonormal: isomorfismo entre ECEF y ENU. Es la transformación lineal que el panel
-          usa en vivo.
-        </p>
-      </article>
+            <div>
+              <dt>Rumbo</dt>
+              <dd className="mono">
+                {frame ? `${fmt(frame.bearingDeg, 2)}°` : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Escala académica</dt>
+              <dd className="mono">
+                {frame ? `${fmt(frame.academicScale, 1)} m/u` : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Destino académico</dt>
+              <dd className="mono">
+                {frame ? fmtVector(frame.destinationAcademic, 3) : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Edificios OSM</dt>
+              <dd className="mono">
+                {planning ? fmtInt(planning.buildings) : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Bloquean el crucero</dt>
+              <dd className="mono">
+                {planning ? fmtInt(planning.obstacleBuildings) : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Waypoints A*</dt>
+              <dd className="mono">
+                {planning
+                  ? `${fmtInt(planning.waypoints)} · desvío ${fmt((planning.detourRatio - 1) * 100, 2)} %`
+                  : "—"}
+              </dd>
+            </div>
+          </dl>
+        </article>
 
-      <article className="card">
-        <div className="card-head">
-          <h2>Temas del documento</h2>
-          <span className="chip">{readyTopics} de 11 con base</span>
-        </div>
-        <ul className="topics">
-          {ALGEBRA_TOPICS.map((topic) => (
-            <li key={topic.topic} className={topic.ready ? "topic-ready" : "topic-pending"}>
-              <span className="topic-mark" />
-              <span className="topic-name">{topic.topic}</span>
-              <span className="topic-detail">{topic.detail}</span>
-            </li>
-          ))}
-        </ul>
-      </article>
-    </section>
+        <article className="card">
+          <div className="card-head">
+            <h2>Matriz ENU</h2>
+            <span className="chip">T(x) = R·x</span>
+          </div>
+          <div className="matrix mono">
+            {(frame?.enuRotation ?? IDENTITY).map((row, rowIndex) => (
+              <div className="matrix-row" key={`row-${rowIndex}`}>
+                {row.map((value, columnIndex) => (
+                  <span key={`cell-${rowIndex}-${columnIndex}`}>
+                    {fmt(value, 5)}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+          <dl className="facts">
+            <div>
+              <dt>det(R)</dt>
+              <dd className="mono">{fmt(live?.rotationDet ?? 1, 5)}</dd>
+            </div>
+            <div>
+              <dt>Rango</dt>
+              <dd className="mono">{live?.rotationRank ?? 3}</dd>
+            </div>
+            <div>
+              <dt>ker(R)</dt>
+              <dd className="mono">&#123;(0, 0, 0)&#125;</dd>
+            </div>
+          </dl>
+          <p className="card-foot">
+            Rotación ortonormal: isomorfismo entre ECEF y ENU. Es la
+            transformación lineal que el panel usa en vivo.
+          </p>
+        </article>
+
+        <article className="card">
+          <div className="card-head">
+            <h2>Temas del documento</h2>
+            <span className="chip">11 de 11 en vivo</span>
+          </div>
+          <ul className="topics">
+            {topics.map((topic) => (
+              <li key={topic.topic} className="topic-ready">
+                <span className="topic-mark" />
+                <span className="topic-name">{topic.topic}</span>
+                <span className="topic-detail">{topic.detail}</span>
+                <span className="topic-live mono">{topic.value}</span>
+              </li>
+            ))}
+          </ul>
+        </article>
+      </section>
+      <div className="data-section">
+        <DataTable telemetry={telemetry} />
+      </div>
+    </>
   );
 }

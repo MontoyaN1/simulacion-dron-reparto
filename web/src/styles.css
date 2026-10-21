@@ -791,7 +791,7 @@ main {
 }
 
 .topic-mark {
-  grid-row: span 2;
+  grid-row: span 3;
   align-self: center;
   width: 6px;
   height: 6px;
@@ -813,6 +813,70 @@ main {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 0.68rem;
+}
+
+.topic-live {
+  grid-column: 2;
+  color: #7dd3fc;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.data-section {
+  margin-top: 14px;
+}
+
+.table-wrap {
+  overflow: auto;
+  max-height: 300px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table th,
+.data-table td {
+  padding: 6px 10px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.data-table th:first-child,
+.data-table td:first-child,
+.data-table th:nth-child(2),
+.data-table td:nth-child(2) {
+  text-align: left;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  font-weight: 560;
+  background: #0b1220;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table tbody tr:nth-child(even) {
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.data-table tbody td {
+  color: #cbd5e1;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.data-table .table-empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 18px;
 }
 
 .topic-pending {

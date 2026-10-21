@@ -45,7 +45,7 @@ export function App() {
             <span className="status-dot" />
             {connected ? "Motor conectado" : "Reconectando"}
           </span>
-          <span className="badge">Fase {health?.phase ?? 2}</span>
+          <span className="badge">Fase {health?.phase ?? 3}</span>
         </div>
       </header>
 
@@ -65,7 +65,7 @@ export function App() {
           </aside>
         </div>
 
-        <DetailsSection />
+        <DetailsSection telemetry={telemetry} />
       </main>
 
       <footer className="footer">

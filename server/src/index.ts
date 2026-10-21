@@ -47,7 +47,7 @@ app.get("/api/health", async () => ({
   ok: true,
   service: SERVICE_NAME,
   version: SERVICE_VERSION,
-  phase: 3,
+  phase: 4,
   uptimeSeconds: Math.round(process.uptime()),
   timestamp: new Date().toISOString(),
 }));

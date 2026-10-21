@@ -138,11 +138,12 @@ Propiedades verificadas en `shared/test/matrix.test.ts`:
 npm test
 ```
 
-Las 41 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
+Las 44 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
 rechazada, determinante e inversa, rango, núcleo e imagen, idempotencia de `P`, ortogonalidad
 de `R`, conversión ECEF/ENU ida y vuelta, distancia y rumbo UTS-UIS, conservación de la norma
-`√20` en el marco académico y la planeación A* (ruta directa, rodeo de obstáculos, edificios
-bajos y respaldo sin paso).
+`√20` en el marco académico, la planeación A* (ruta directa, rodeo de obstáculos, edificios
+bajos y respaldo sin paso) y el panel en vivo (reconstrucción por combinación lineal,
+invariancia de la norma bajo `R` y rumbo de respaldo sin velocidad horizontal).
 
 ## 8. Planeación de la ruta con A*
 
@@ -179,3 +180,25 @@ mide como `longitud(A*) / ‖UIS − UTS‖` y se publica en `GET /api/route`.
 
 Trazabilidad: `data/buildings.geojson`, `shared/src/planning/{grid,astar,plan}.ts`,
 `server/src/sim/buildings.ts` y `web/src/cesium/scene.ts` (extrusión en Cesium).
+
+## 9. Panel de álgebra en vivo
+
+Cada mensaje de telemetría (15 Hz) alimenta `liveAlgebra` en `shared/src/live.ts`, que publica
+los valores de los 11 temas:
+
+- **Vectores**: `p = (x, y, z)` y `‖p‖`.
+- **Recta**: `L(t) = p + t·ĥ`, con `ĥ` la dirección horizontal unitaria de la velocidad.
+- **Plano**: el plano de crucero `z = h` y su distancia al dron.
+- **Producto interno**: `v · n̂` con `n̂ = (0, 1, 0)`, y el rumbo `atan2(ĥ_x, ĥ_y)`.
+- **Proyecciones**: `P·p = (x, y, 0)` con `P = diag(1, 1, 0)`.
+- **Subespacios**: `H = {v : v_z = 0}`, de dimensión 2.
+- **Espacio generado**: `span{ĥ, r̂, k̂}` con `r̂ = k̂ × ĥ`; su determinante es 1.
+- **Combinaciones lineales**: `p = a·ĥ + b·r̂ + c·k̂` con `a = p·ĥ`, `b = p·r̂`, `c = p_z`.
+  La reconstrucción se comprueba en vivo (`error < 10⁻⁹`).
+- **Transformaciones**: `T(v) = R·v` y la verificación `‖R·v‖ = ‖v‖`.
+- **Núcleo e imagen**: `ker P = ⟨k̂⟩` (nulidad 1) e `Im P = plano xy` (rango 2).
+- **Matriz, rango e isomorfismo**: `det(R) = 1` y `rango(R) = 3`, luego `R` es isomorfismo.
+
+La tabla de datos muestrea la telemetría a 1 Hz (30 filas) con `t`, fase, posición, velocidad y
+batería. Trazabilidad: `shared/src/live.ts`, `web/src/components/DetailsSection.tsx` y
+`web/src/components/DataTable.tsx`.

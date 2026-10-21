@@ -5,12 +5,12 @@ Tecnológicas de Santander (UTS) hasta la Universidad Industrial de Santander (U
 Bucaramanga, con telemetría en vivo y el cálculo de los temas de Álgebra Lineal del
 documento de la propuesta.
 
-**Estado actual: fase 3 completada.** El repositorio trae el monorepo, el marco de coordenadas
+**Estado actual: fase 4 completada.** El repositorio trae el monorepo, el marco de coordenadas
 reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista,
 telemetría en vivo por WebSocket, una escena 3D con CesiumJS (dron procedural, estela, cuatro
-cámaras y panel en tiempo real) y la ciudad: edificios de OpenStreetMap extruidos y ruta
-planificada con A* sobre una rejilla de 10 m que evita los edificios que alcanzan la altura de
-crucero.
+cámaras y panel en tiempo real), la ciudad con edificios de OpenStreetMap extruidos y ruta
+planificada con A* sobre una rejilla de 10 m, y el panel de álgebra en vivo: los 11 temas del
+documento con sus valores calculados en cada muestra y una tabla de datos a 1 Hz.
 
 ## Stack
 
@@ -89,7 +89,7 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 | 1 | Motor determinista, telemetría y WebSocket | completada |
 | 2 | Escena CesiumJS, dron procedural y cámaras | completada |
 | 3 | Edificios OSM, rejilla y A* con altura | completada |
-| 4 | Panel en vivo con los 11 temas y tabla de datos | pendiente |
+| 4 | Panel en vivo con los 11 temas y tabla de datos | completada |
 | 5 | Decisiones por viento, zonas restringidas y batería | pendiente |
 | 6 | SQLite, replay y exportación CSV | pendiente |
 | 7 | Pulido, informe y guion de exposición | pendiente |
