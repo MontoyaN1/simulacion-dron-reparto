@@ -126,9 +126,7 @@ export class SimulationRuntime {
     this.telemetryAccumulator = 0;
     this.lastTick = performance.now();
     this.eventLog = [];
-    this.emit({ type: "route", payload: { route: this.route } });
-    this.emitStatus();
-    this.emitTelemetry();
+    this.emit({ type: "init", payload: this.session() });
   }
 
   setSpeed(value: number): void {

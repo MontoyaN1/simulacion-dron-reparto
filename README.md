@@ -5,16 +5,18 @@ Tecnológicas de Santander (UTS) hasta la Universidad Industrial de Santander (U
 Bucaramanga, con telemetría en vivo y el cálculo de los temas de Álgebra Lineal del
 documento de la propuesta.
 
-**Estado actual: fase 1 completada.** El repositorio trae el monorepo, el marco de coordenadas
-reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista
-y telemetría en vivo por WebSocket. La escena 3D con CesiumJS entra en la fase 2.
+**Estado actual: fase 2 completada.** El repositorio trae el monorepo, el marco de coordenadas
+reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista,
+telemetría en vivo por WebSocket y una escena 3D con CesiumJS: dron procedural, ruta, estela,
+cámaras de persecución/órbita/cenital/libre y panel de telemetría en tiempo real. La ciudad con
+edificios extruidos y la planeación A* entran en la fase 3.
 
 ## Stack
 
 | Capa | Tecnología |
 | --- | --- |
-| Motor y API | Node 22 · TypeScript · Fastify · `ws` (fase 1) |
-| Cliente | Vite · React 19 · CesiumJS (fase 2) |
+| Motor y API | Node 22 · TypeScript · Fastify · `ws` |
+| Cliente | Vite · React 19 · CesiumJS 1.146 |
 | Matemática | `shared/` sin dependencias, probada con `node:test` |
 | Historial | `node:sqlite` (fase 6, sin binarios nativos) |
 
@@ -22,8 +24,8 @@ y telemetría en vivo por WebSocket. La escena 3D con CesiumJS entra en la fase 
 
 ```
 shared/   vectores, matrices, geometría, coordenadas y marco de la ruta
-server/   API HTTP (y más adelante el motor de simulación por WebSocket)
-web/      interfaz React + Vite
+server/   API HTTP y motor de simulación por WebSocket
+web/      interfaz React + Vite; la escena Cesium vive en web/src/cesium
 docs/     modelo matemático y trazabilidad con el documento
 ```
 
@@ -36,7 +38,7 @@ docs/     modelo matemático y trazabilidad con el documento
 
 ```bash
 npm install      # instala los tres workspaces
-npm run dev      # API en :3100 y web en :5173
+npm run dev      # API en :3100 y web en :5173 (copia antes los assets de Cesium)
 npm run check        # typecheck + pruebas
 npm test             # pruebas de la librería y del motor
 npm run sim -w server # vuelo headless con tabla de telemetría
@@ -44,7 +46,14 @@ npm run build        # build de producción del cliente
 ```
 
 La API queda en `http://localhost:3100` y el cliente en `http://localhost:5173`. El puerto
-de la API se puede cambiar con `PORT=otro npm run dev`.
+de la API se puede cambiar con `PORT=otro npm run dev`. Los assets de Cesium (`Workers`,
+`Assets`, `Widgets`, `ThirdParty`) se copian a `web/public/cesium` con
+`web/scripts/copy-cesium.mjs` antes de `dev` y `build`; esa carpeta está ignorada por git.
+
+La primera conexión abre el vuelo automáticamente. En la escena se puede pausar/reanudar,
+reiniciar, cambiar la velocidad (1×, 2×, 4×) y alternar entre las cámaras Persecución, Órbita,
+Cenital y Libre. Las teselas de OpenStreetMap se descargan en vivo, así que la escena necesita
+internet.
 
 Endpoints disponibles en fase 0:
 
@@ -73,7 +82,7 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 | --- | --- | --- |
 | 0 | Monorepo, marco de coordenadas, librería matemática | completada |
 | 1 | Motor determinista, telemetría y WebSocket | completada |
-| 2 | Escena CesiumJS, dron procedural y cámaras | pendiente |
+| 2 | Escena CesiumJS, dron procedural y cámaras | completada |
 | 3 | Edificios OSM, rejilla y A* con altura | pendiente |
 | 4 | Panel en vivo con los 11 temas y tabla de datos | pendiente |
 | 5 | Decisiones por viento, zonas restringidas y batería | pendiente |
