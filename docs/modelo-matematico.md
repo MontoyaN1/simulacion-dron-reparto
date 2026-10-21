@@ -138,7 +138,44 @@ Propiedades verificadas en `shared/test/matrix.test.ts`:
 npm test
 ```
 
-Las 29 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
+Las 41 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
 rechazada, determinante e inversa, rango, núcleo e imagen, idempotencia de `P`, ortogonalidad
-de `R`, conversión ECEF/ENU ida y vuelta, distancia y rumbo UTS-UIS, y la conservación de la
-norma `√20` en el marco académico.
+de `R`, conversión ECEF/ENU ida y vuelta, distancia y rumbo UTS-UIS, conservación de la norma
+`√20` en el marco académico y la planeación A* (ruta directa, rodeo de obstáculos, edificios
+bajos y respaldo sin paso).
+
+## 8. Planeación de la ruta con A*
+
+Las huellas de edificios se descargan una vez con `scripts/fetch-buildings.mjs` desde Overpass y
+se recortan a 450 m alrededor de la recta UTS-UIS. La altura de cada edificio es `height` de OSM
+o, si falta, `3.2·building:levels + 1.5` metros.
+
+La rejilla de búsqueda usa celdas de 10 m sobre el rectángulo que encierra origen y destino más
+320 m de margen. Una celda queda bloqueada si su centro cae dentro de la huella dilatada 8 m de
+un edificio cuya altura alcanza el nivel de crucero con margen de seguridad:
+
+```
+h_edificio ≥ z_crucero − margen = 50 − 12 = 38 m
+```
+
+El costo de A* es 1 entre celdas ortogonales y `√2` en diagonal, con heurística octile
+
+```
+h(n) = Δx + Δy + (√2 − 2)·min(Δx, Δy)
+```
+
+que es admisible y consistente porque nunca sobreestima el costo real en la rejilla. Se prohíbe
+cortar esquinas en diagonal y, al reconstruir, un suavizado por visibilidad (string pulling)
+elimina los zigzag de la rejilla comprobando que el segmento no cruce celdas bloqueadas.
+
+La ruta que consume el motor es
+
+```
+[UTS, UTS + (0,0,50), waypoints…, UIS + (0,0,50), UIS]
+```
+
+de modo que el despegue y el descenso son verticales y el crucero conserva 50 m AGL. El desvío se
+mide como `longitud(A*) / ‖UIS − UTS‖` y se publica en `GET /api/route`.
+
+Trazabilidad: `data/buildings.geojson`, `shared/src/planning/{grid,astar,plan}.ts`,
+`server/src/sim/buildings.ts` y `web/src/cesium/scene.ts` (extrusión en Cesium).

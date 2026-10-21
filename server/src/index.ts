@@ -6,9 +6,10 @@ import {
   CAMPUSES,
   OPERATION_LIMITS,
   isClientCommand,
+  planRoute,
   routeFrame,
-  straightRoute,
 } from "@dron/shared";
+import { loadBuildings } from "./sim/buildings";
 import { SimulationRuntime } from "./sim/runtime";
 
 const SERVICE_NAME = "simulacion-dron-reparto";
@@ -16,8 +17,23 @@ const SERVICE_VERSION = "0.2.0";
 const PORT = Number(process.env.PORT ?? 3100);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
-const route = straightRoute(routeFrame, OPERATION_LIMITS.cruiseAltitudeAglMeters);
+const buildings = loadBuildings();
+const plan = planRoute({
+  start: [0, 0],
+  goal: [routeFrame.displacement[0], routeFrame.displacement[1]],
+  buildings: buildings.footprints,
+  cruiseAltitude: OPERATION_LIMITS.cruiseAltitudeAglMeters,
+  clearance: 12,
+  cellSize: 10,
+  inflate: 8,
+});
+const route = plan.route;
 const runtime = new SimulationRuntime(route);
+
+console.log(
+  `[plan] ${buildings.count} edificios, ${plan.stats.obstacleBuildings} sobre la altura de crucero, ` +
+    `${plan.stats.waypoints} waypoints, desvio ${(plan.stats.detourRatio * 100 - 100).toFixed(1)} %`,
+);
 
 const app = Fastify({
   logger: {
@@ -31,7 +47,7 @@ app.get("/api/health", async () => ({
   ok: true,
   service: SERVICE_NAME,
   version: SERVICE_VERSION,
-  phase: 2,
+  phase: 3,
   uptimeSeconds: Math.round(process.uptime()),
   timestamp: new Date().toISOString(),
 }));
@@ -56,7 +72,17 @@ app.get("/api/frame", async () => ({
 
 app.get("/api/sim", async () => runtime.session());
 
-app.get("/api/route", async () => ({ route }));
+app.get("/api/route", async () => ({ route, planning: plan.stats, buildings: buildings.count }));
+
+app.get("/api/buildings", async (_request, reply) => {
+  if (!buildings.geojson) {
+    return reply.code(404).send({ error: "Sin datos de edificios" });
+  }
+  return reply
+    .header("Cache-Control", "public, max-age=3600")
+    .type("application/geo+json")
+    .send(buildings.geojson);
+});
 
 app.post("/api/sim/action", async (request, reply) => {
   const body = request.body as { action?: unknown; value?: unknown } | undefined;

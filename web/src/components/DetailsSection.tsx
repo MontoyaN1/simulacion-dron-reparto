@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
 import type { GeodeticPoint } from "@dron/shared";
-import { fmt, fmtVector } from "../format";
+import { fmt, fmtInt, fmtVector } from "../format";
 
 type Triple = readonly [number, number, number];
 type Matrix3 = readonly [Triple, Triple, Triple];
+
+interface PlanningSummary {
+  buildings: number;
+  waypoints: number;
+  obstacleBuildings: number;
+  detourRatio: number;
+  cellSize: number;
+}
 
 interface FramePayload {
   originGeodetic: GeodeticPoint;
@@ -19,6 +27,16 @@ interface FramePayload {
 
 interface FrameResponse {
   frame: FramePayload;
+}
+
+interface RouteResponse {
+  buildings: number;
+  planning: {
+    waypoints: number;
+    obstacleBuildings: number;
+    detourRatio: number;
+    cellSize: number;
+  };
 }
 
 const ALGEBRA_TOPICS: readonly { topic: string; detail: string; ready: boolean }[] = [
@@ -110,6 +128,29 @@ function RouteSketch({ east, north }: { east: number; north: number }) {
 
 export function DetailsSection() {
   const [frame, setFrame] = useState<FramePayload | null>(null);
+  const [planning, setPlanning] = useState<PlanningSummary | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/route")
+      .then((response) => (response.ok ? (response.json() as Promise<RouteResponse>) : null))
+      .then((data) => {
+        if (!active || !data) return;
+        setPlanning({
+          buildings: data.buildings,
+          waypoints: data.planning.waypoints,
+          obstacleBuildings: data.planning.obstacleBuildings,
+          detourRatio: data.planning.detourRatio,
+          cellSize: data.planning.cellSize,
+        });
+      })
+      .catch(() => {
+        if (active) setPlanning(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -136,7 +177,7 @@ export function DetailsSection() {
       <article className="card">
         <div className="card-head">
           <h2>Ruta real</h2>
-          <span className="chip">ENU · escala real</span>
+          <span className="chip">A* · {planning ? `${planning.cellSize} m` : "ENU"}</span>
         </div>
         <RouteSketch east={frame?.destinationEnu[0] ?? 0} north={frame?.destinationEnu[1] ?? 0} />
         <dl className="facts">
@@ -155,6 +196,22 @@ export function DetailsSection() {
           <div>
             <dt>Destino académico</dt>
             <dd className="mono">{frame ? fmtVector(frame.destinationAcademic, 3) : "—"}</dd>
+          </div>
+          <div>
+            <dt>Edificios OSM</dt>
+            <dd className="mono">{planning ? fmtInt(planning.buildings) : "—"}</dd>
+          </div>
+          <div>
+            <dt>Bloquean el crucero</dt>
+            <dd className="mono">{planning ? fmtInt(planning.obstacleBuildings) : "—"}</dd>
+          </div>
+          <div>
+            <dt>Waypoints A*</dt>
+            <dd className="mono">
+              {planning
+                ? `${fmtInt(planning.waypoints)} · desvío ${fmt((planning.detourRatio - 1) * 100, 2)} %`
+                : "—"}
+            </dd>
           </div>
         </dl>
       </article>

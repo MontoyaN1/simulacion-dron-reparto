@@ -31,6 +31,7 @@ export class DroneScene {
   private targetReady = false;
   private smoothedHeading = 0;
   private destroyed = false;
+  private buildings: Cesium.GeoJsonDataSource | null = null;
   private readonly resizeObserver: ResizeObserver;
 
   constructor(container: HTMLElement) {
@@ -63,7 +64,7 @@ export class DroneScene {
 
     const scene = this.viewer.scene;
     scene.globe.baseColor = css("#0a1220");
-    scene.globe.enableLighting = true;
+    scene.globe.enableLighting = false;
     scene.globe.showGroundAtmosphere = true;
     scene.fog.enabled = true;
     scene.fog.density = 0.00016;
@@ -79,6 +80,7 @@ export class DroneScene {
     this.world = createWorldFrame();
     this.addBeacons();
     this.drone = new DroneModel(this.viewer, this.world);
+    void this.loadBuildings();
 
     this.preRenderHandler = () => this.preRender();
     scene.preRender.addEventListener(this.preRenderHandler);
@@ -127,6 +129,38 @@ export class DroneScene {
         },
       }),
     );
+  }
+
+  private async loadBuildings(): Promise<void> {
+    try {
+      const dataSource = await Cesium.GeoJsonDataSource.load("/api/buildings", {
+        clampToGround: false,
+        credit: "OpenStreetMap contributors",
+      });
+      if (this.destroyed) return;
+
+      for (const entity of dataSource.entities.values) {
+        const polygon = entity.polygon;
+        if (!polygon) continue;
+        const rawHeight = entity.properties?.height?.getValue(Cesium.JulianDate.now());
+        const height = typeof rawHeight === "number" && rawHeight > 0 ? rawHeight : 9;
+        const seed = String(entity.id)
+          .split("")
+          .reduce((total, character) => total + character.charCodeAt(0), 0);
+        const shade = 0.24 + ((seed % 13) / 13) * 0.14;
+        polygon.height = new Cesium.ConstantProperty(0.2);
+        polygon.extrudedHeight = new Cesium.ConstantProperty(height);
+        polygon.material = new Cesium.ColorMaterialProperty(
+          Cesium.Color.fromHsl(0.58 + ((seed % 7) / 7) * 0.03, 0.22, shade, 0.97),
+        );
+        polygon.outline = new Cesium.ConstantProperty(false);
+      }
+
+      this.buildings = dataSource;
+      await this.viewer.dataSources.add(dataSource);
+    } catch {
+      this.buildings = null;
+    }
   }
 
   attachBuffer(buffer: TelemetryBuffer): void {
@@ -255,6 +289,10 @@ export class DroneScene {
     this.resizeObserver.disconnect();
     this.viewer.scene.preRender.removeEventListener(this.preRenderHandler);
     this.drone.destroy();
+    if (this.buildings) {
+      this.viewer.dataSources.remove(this.buildings, true);
+      this.buildings = null;
+    }
     for (const entity of [...this.decorations, ...this.routeEntities]) {
       this.viewer.entities.remove(entity);
     }

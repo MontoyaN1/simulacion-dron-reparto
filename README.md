@@ -5,11 +5,12 @@ Tecnológicas de Santander (UTS) hasta la Universidad Industrial de Santander (U
 Bucaramanga, con telemetría en vivo y el cálculo de los temas de Álgebra Lineal del
 documento de la propuesta.
 
-**Estado actual: fase 2 completada.** El repositorio trae el monorepo, el marco de coordenadas
+**Estado actual: fase 3 completada.** El repositorio trae el monorepo, el marco de coordenadas
 reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista,
-telemetría en vivo por WebSocket y una escena 3D con CesiumJS: dron procedural, ruta, estela,
-cámaras de persecución/órbita/cenital/libre y panel de telemetría en tiempo real. La ciudad con
-edificios extruidos y la planeación A* entran en la fase 3.
+telemetría en vivo por WebSocket, una escena 3D con CesiumJS (dron procedural, estela, cuatro
+cámaras y panel en tiempo real) y la ciudad: edificios de OpenStreetMap extruidos y ruta
+planificada con A* sobre una rejilla de 10 m que evita los edificios que alcanzan la altura de
+crucero.
 
 ## Stack
 
@@ -23,9 +24,11 @@ edificios extruidos y la planeación A* entran en la fase 3.
 ## Estructura
 
 ```
-shared/   vectores, matrices, geometría, coordenadas y marco de la ruta
-server/   API HTTP y motor de simulación por WebSocket
+shared/   vectores, matrices, geometría, coordenadas, ruta y planeación A*
+server/   API HTTP, motor de simulación y carga de edificios
 web/      interfaz React + Vite; la escena Cesium vive en web/src/cesium
+scripts/  descarga y recorte de edificios desde Overpass
+data/     buildings.geojson versionado (718 edificios del corredor)
 docs/     modelo matemático y trazabilidad con el documento
 ```
 
@@ -42,6 +45,7 @@ npm run dev      # API en :3100 y web en :5173 (copia antes los assets de Cesium
 npm run check        # typecheck + pruebas
 npm test             # pruebas de la librería y del motor
 npm run sim -w server # vuelo headless con tabla de telemetría
+npm run fetch:buildings # actualiza data/buildings.geojson desde Overpass
 npm run build        # build de producción del cliente
 ```
 
@@ -55,12 +59,13 @@ reiniciar, cambiar la velocidad (1×, 2×, 4×) y alternar entre las cámaras Pe
 Cenital y Libre. Las teselas de OpenStreetMap se descargan en vivo, así que la escena necesita
 internet.
 
-Endpoints disponibles en fase 0:
+Endpoints disponibles:
 
 - `GET /api/health`
 - `GET /api/frame` — campus, límites de operación y marco de la ruta
 - `GET /api/sim` — estado, telemetría y ruta actual
-- `GET /api/route` — polilínea de la ruta
+- `GET /api/route` — polilínea planificada, estadísticas de A* y número de edificios
+- `GET /api/buildings` — GeoJSON de edificios del corredor
 - `POST /api/sim/action` — `start`, `pause`, `resume`, `reset`, `speed`
 - `WS /ws` — init, telemetría a 15 Hz, eventos y estado
 
@@ -83,7 +88,7 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 | 0 | Monorepo, marco de coordenadas, librería matemática | completada |
 | 1 | Motor determinista, telemetría y WebSocket | completada |
 | 2 | Escena CesiumJS, dron procedural y cámaras | completada |
-| 3 | Edificios OSM, rejilla y A* con altura | pendiente |
+| 3 | Edificios OSM, rejilla y A* con altura | completada |
 | 4 | Panel en vivo con los 11 temas y tabla de datos | pendiente |
 | 5 | Decisiones por viento, zonas restringidas y batería | pendiente |
 | 6 | SQLite, replay y exportación CSV | pendiente |
@@ -92,9 +97,10 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 ## Datos y atribución
 
 Las coordenadas de los campus provienen de OpenStreetMap (© colaboradores de OpenStreetMap,
-ODbL 1.0) y se verificaron con Nominatim. En la fase 3 las huellas de edificios se descargan
-una sola vez y se recortan al corredor de vuelo; el archivo resultante se versiona para que la
-demo funcione sin conexión.
+ODbL 1.0) y se verificaron con Nominatim. Las huellas de los edificios se descargan una sola vez
+con `npm run fetch:buildings` desde Overpass, se recortan a 450 m de la recta UTS-UIS y se
+versionan en `data/buildings.geojson` (718 edificios); así el motor y la escena funcionan sin
+volver a consultar Overpass. Las teselas del mapa sí se descargan en vivo.
 
 ## Contexto académico
 
