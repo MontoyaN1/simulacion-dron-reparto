@@ -5,9 +5,9 @@ Tecnológicas de Santander (UTS) hasta la Universidad Industrial de Santander (U
 Bucaramanga, con telemetría en vivo y el cálculo de los temas de Álgebra Lineal del
 documento de la propuesta.
 
-**Estado actual: fase 0 completada.** El repositorio ya trae el monorepo, el marco de
-coordenadas reales UTS-UIS, la librería de álgebra lineal con pruebas y una página de
-verificación que consume la API. La escena 3D con CesiumJS entra en la fase 2.
+**Estado actual: fase 1 completada.** El repositorio trae el monorepo, el marco de coordenadas
+reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista
+y telemetría en vivo por WebSocket. La escena 3D con CesiumJS entra en la fase 2.
 
 ## Stack
 
@@ -37,9 +37,10 @@ docs/     modelo matemático y trazabilidad con el documento
 ```bash
 npm install      # instala los tres workspaces
 npm run dev      # API en :3100 y web en :5173
-npm run check    # typecheck + pruebas
-npm test         # solo pruebas de la librería matemática
-npm run build    # build de producción del cliente
+npm run check        # typecheck + pruebas
+npm test             # pruebas de la librería y del motor
+npm run sim -w server # vuelo headless con tabla de telemetría
+npm run build        # build de producción del cliente
 ```
 
 La API queda en `http://localhost:3100` y el cliente en `http://localhost:5173`. El puerto
@@ -49,6 +50,10 @@ Endpoints disponibles en fase 0:
 
 - `GET /api/health`
 - `GET /api/frame` — campus, límites de operación y marco de la ruta
+- `GET /api/sim` — estado, telemetría y ruta actual
+- `GET /api/route` — polilínea de la ruta
+- `POST /api/sim/action` — `start`, `pause`, `resume`, `reset`, `speed`
+- `WS /ws` — init, telemetría a 15 Hz, eventos y estado
 
 ## Coordenadas
 
@@ -67,7 +72,7 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 | Fase | Alcance | Estado |
 | --- | --- | --- |
 | 0 | Monorepo, marco de coordenadas, librería matemática | completada |
-| 1 | Motor determinista, telemetría y WebSocket | pendiente |
+| 1 | Motor determinista, telemetría y WebSocket | completada |
 | 2 | Escena CesiumJS, dron procedural y cámaras | pendiente |
 | 3 | Edificios OSM, rejilla y A* con altura | pendiente |
 | 4 | Panel en vivo con los 11 temas y tabla de datos | pendiente |
