@@ -189,6 +189,29 @@ main {
   opacity: 0.55;
 }
 
+.stage-credits {
+  position: absolute;
+  right: 14px;
+  top: 64px;
+  z-index: 6;
+  max-width: 240px;
+  font-size: 9px;
+  line-height: 1.35;
+  opacity: 0.45;
+  overflow: hidden;
+  text-align: right;
+}
+
+.stage-credits > div {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-credits:hover {
+  opacity: 0.9;
+}
+
 .stage-host .cesium-viewer-bottom {
   z-index: 6;
   right: 14px;

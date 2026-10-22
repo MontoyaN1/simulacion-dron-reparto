@@ -54,8 +54,32 @@ test("la altitud nunca es negativa y el crucero ronda la altura fijada", () => {
     maximum = Math.max(maximum, altitude);
   }
   assert.ok(minimum >= 0);
-  assert.ok(maximum < CRUISE_ALTITUDE + 2);
+  assert.ok(maximum < CRUISE_ALTITUDE + 6);
   assert.ok(maximum > CRUISE_ALTITUDE - 2);
+});
+
+test("el crucero tiene subidas y bajadas suaves", () => {
+  const sim = new DroneSimulation(route);
+  sim.start();
+  const dt = 1 / 30;
+  let climbs = 0;
+  let descents = 0;
+  let minimum = Infinity;
+  let maximum = 0;
+  for (let step = 0; step < 12000 && !sim.isDelivered; step += 1) {
+    sim.step(dt);
+    const telemetry = sim.telemetry();
+    if (telemetry.phase !== "cruise") continue;
+    minimum = Math.min(minimum, telemetry.altitudeAgl);
+    maximum = Math.max(maximum, telemetry.altitudeAgl);
+    if (telemetry.verticalSpeed > 0.15) climbs += 1;
+    if (telemetry.verticalSpeed < -0.15) descents += 1;
+  }
+  assert.ok(maximum - minimum > 2, `oscilacion insuficiente: ${maximum - minimum}`);
+  assert.ok(maximum > CRUISE_ALTITUDE + 2);
+  assert.ok(minimum >= CRUISE_ALTITUDE - 1e-6);
+  assert.ok(climbs > 0);
+  assert.ok(descents > 0);
 });
 
 test("la simulacion es determinista con el mismo paso de tiempo", () => {

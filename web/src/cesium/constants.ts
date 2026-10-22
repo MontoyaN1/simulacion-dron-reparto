@@ -1,4 +1,5 @@
 export const BASE_ALTITUDE_METERS = 0;
+export const CITY_GROUND_HEIGHT = 938.5;
 
 export const CAMERA_MODES = [
   { id: "chase", label: "Persecución" },

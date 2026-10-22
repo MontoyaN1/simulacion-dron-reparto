@@ -43,7 +43,13 @@ export function TelemetryPanel({ telemetry, status }: Props) {
         />
         <Row
           label="Velocidad vertical"
-          value={t ? `${fmt(t.verticalSpeed, 2)} m/s` : "—"}
+          value={
+            t
+              ? Math.abs(t.verticalSpeed) < 0.02
+                ? "0,00 m/s"
+                : `${t.verticalSpeed > 0 ? "↑" : "↓"} ${fmt(Math.abs(t.verticalSpeed), 2)} m/s`
+              : "—"
+          }
           mono
         />
         <Row label="Altitud AGL" value={t ? `${fmt(t.altitudeAgl, 0)} m` : "—"} mono />

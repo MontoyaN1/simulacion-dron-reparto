@@ -29,6 +29,8 @@ export class DroneSimulation {
   private energyWh = 0;
   private headingDeg = 0;
   private powerWatts = 0;
+  private verticalOffset = 0;
+  private verticalSpeedExtra = 0;
 
   private phase: DronePhase = "idle";
   private started = false;
@@ -82,6 +84,8 @@ export class DroneSimulation {
     this.energyWh = 0;
     this.headingDeg = 0;
     this.powerWatts = 0;
+    this.verticalOffset = 0;
+    this.verticalSpeedExtra = 0;
     this.phase = "idle";
     this.started = false;
     this.delivered = false;
@@ -199,6 +203,10 @@ export class DroneSimulation {
     }
 
     const progress = this.totalLength > 0 ? 1 - this.distanceRemaining() / this.totalLength : 0;
+    const nextOffset = this.verticalOffsetAt(progress);
+    this.verticalSpeedExtra = (nextOffset - this.verticalOffset) / dt;
+    this.verticalOffset = nextOffset;
+
     if (!this.halfwayAnnounced && progress >= 0.5) {
       this.halfwayAnnounced = true;
       this.pushEvent("system", "Mitad del recorrido superada");
@@ -209,6 +217,15 @@ export class DroneSimulation {
       this.lowBatteryWarned = true;
       this.pushEvent("warning", "Bateria por debajo del 20 %");
     }
+  }
+
+  private verticalOffsetAt(progress: number): number {
+    const span = Math.min(1, Math.max(0, (progress - 0.02) / 0.94));
+    const envelope = Math.sin(Math.PI * span);
+    const wave =
+      4.2 * (1 - Math.cos(2 * Math.PI * 8 * span)) * 0.5 +
+      1.0 * (1 - Math.cos(2 * Math.PI * 19 * span)) * 0.5;
+    return envelope * wave;
   }
 
   private classifyPhase(target: Vec3, horizontalDistance: number): DronePhase {
@@ -227,6 +244,8 @@ export class DroneSimulation {
     this.position = [last[0], last[1], last[2]];
     this.velocity = [0, 0, 0];
     this.acceleration = [0, 0, 0];
+    this.verticalOffset = 0;
+    this.verticalSpeedExtra = 0;
     this.delivered = true;
     this.phase = "delivered";
     this.pushEvent("delivery", "Paquete entregado en la UIS");
@@ -243,17 +262,20 @@ export class DroneSimulation {
   }
 
   telemetry(): Telemetry {
-    const speed = norm(this.velocity);
     const remaining = this.distanceRemaining();
+    const altitude = this.position[2] + this.verticalOffset;
+    const verticalSpeed = this.velocity[2] + this.verticalSpeedExtra;
+    const velocity: Vec3 = [this.velocity[0], this.velocity[1], verticalSpeed];
+    const speed = norm(velocity);
     return {
       t: this.elapsed,
-      position: [this.position[0], this.position[1], this.position[2]],
-      velocity: [this.velocity[0], this.velocity[1], this.velocity[2]],
+      position: [this.position[0], this.position[1], altitude],
+      velocity,
       acceleration: [this.acceleration[0], this.acceleration[1], this.acceleration[2]],
       speed,
-      verticalSpeed: this.velocity[2],
+      verticalSpeed,
       headingDeg: this.headingDeg,
-      altitudeAgl: this.position[2],
+      altitudeAgl: altitude,
       distanceTravelled: this.travelled,
       distanceRemaining: remaining,
       progress: this.totalLength > 0 ? Math.max(0, Math.min(1, 1 - remaining / this.totalLength)) : 0,
