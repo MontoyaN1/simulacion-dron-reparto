@@ -19,3 +19,5 @@ data/*.sqlite
 .playwright-mcp/
 
 web/public/cesium/
+
+data/tiles/

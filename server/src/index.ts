@@ -14,6 +14,7 @@ import {
   routeFrame,
 } from "@dron/shared";
 import { loadBuildings } from "./sim/buildings";
+import { registrarProxyTiles } from "./tiles";
 import { SimulationRuntime } from "./sim/runtime";
 
 const SERVICE_NAME = "simulacion-dron-reparto";
@@ -46,6 +47,7 @@ const app = Fastify({
 });
 
 await app.register(websocket);
+await registrarProxyTiles(app);
 
 // Cliente compilado (producción): sirve web/dist y hace fallback SPA.
 // En desarrollo el cliente vive en Vite (:5173) y aquí no se registra nada.
