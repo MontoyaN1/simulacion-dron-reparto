@@ -1,16 +1,17 @@
 import * as Cesium from "cesium";
 import { routeFrame, type Vec3 } from "@dron/shared";
-import { CITY_GROUND_HEIGHT, COLORS, type CameraMode } from "./constants";
+import { CITY_GROUND_HEIGHT, COLORS, MISSION_ZONES, type CameraMode } from "./constants";
 import { DroneModel } from "./drone";
+import { CameraRig } from "./camera-rig";
+import { loadBuildingPrimitive } from "./buildings";
 import { createWorldFrame, type WorldFrame } from "./world";
+import { TerrainSampling } from "./terrain";
+import { MissionDirector, type CameraShot, type MissionState } from "./mission";
 import type { TelemetryBuffer } from "../sim/buffer";
 
-const INITIAL_DURATION_MS = 2600;
-const CAMERA_SETTLE_MS = 2600;
-const CAMERA_FOV_DEG = 55;
-const CHASE_DISTANCE = 9.5;
-const CHASE_SIDE = 0.6;
-const CHASE_HEIGHT = 2.4;
+const INITIAL_DURATION_MS = 2400;
+const CAMERA_SETTLE_MS = 2400;
+const CAMERA_FOV_DEG = 52;
 
 const css = (value: string, alpha = 1): Cesium.Color =>
   Cesium.Color.fromCssColorString(value).withAlpha(alpha);
@@ -19,26 +20,72 @@ export class DroneScene {
   private readonly viewer: Cesium.Viewer;
   private readonly world: WorldFrame;
   private readonly drone: DroneModel;
+  private readonly cameraRig: CameraRig;
+  private readonly terrain: TerrainSampling;
+  private missionDirector: MissionDirector | null = null;
+  private missionCallback: ((state: MissionState) => void) | null = null;
+  private holdCallback: ((hold: boolean) => void) | null = null;
+  private shotActive = false;
   private decorations: Cesium.Entity[] = [];
   private routeEntities: Cesium.Entity[] = [];
   private route: readonly Vec3[] = [];
   private readonly preRenderHandler: () => void;
   private buffer: TelemetryBuffer | null = null;
-  private cameraMode: CameraMode = "chase";
   private cameraUnlockAt = performance.now() + INITIAL_DURATION_MS;
+  private cameraFollowing = false;
   private destroyed = false;
-  private buildings: Cesium.GeoJsonDataSource | null = null;
-  private cityTileset: Cesium.Cesium3DTileset | null = null;
+  private cityPrimitive: Cesium.Primitive | null = null;
+  private osmBuildings: Cesium.Cesium3DTileset | null = null;
   private readonly resizeObserver: ResizeObserver;
   private readonly creditContainer: HTMLDivElement;
+  private renderLoopHandle: number | null = null;
+  private renderLoopInterval: number | null = null;
+  private lastRenderAt = 0;
+
+  private readonly renderLoopTick: () => void = () => {
+    if (this.destroyed) return;
+    const now = performance.now();
+    if (now - this.lastRenderAt < 20) return;
+    this.lastRenderAt = now;
+    try {
+      this.viewer.resize();
+      this.viewer.render();
+    } catch (error) {
+      console.warn("Error de render tolerado por Cesium", error);
+    }
+    this.renderLoopHandle = requestAnimationFrame(this.renderLoopTick);
+  };
+
+  private startRenderLoop(): void {
+    this.lastRenderAt = performance.now();
+    this.renderLoopHandle = requestAnimationFrame(this.renderLoopTick);
+    this.renderLoopInterval = window.setInterval(this.renderLoopTick, 1000 / 60);
+  }
+
+  private stopRenderLoop(): void {
+    if (this.renderLoopHandle !== null) {
+      cancelAnimationFrame(this.renderLoopHandle);
+      this.renderLoopHandle = null;
+    }
+    if (this.renderLoopInterval !== null) {
+      window.clearInterval(this.renderLoopInterval);
+      this.renderLoopInterval = null;
+    }
+  }
 
   constructor(container: HTMLElement) {
     this.creditContainer = document.createElement("div");
     this.creditContainer.className = "stage-credits";
     container.append(this.creditContainer);
 
+    const imagery = new Cesium.UrlTemplateImageryProvider({
+      url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      maximumLevel: 19,
+      credit: new Cesium.Credit("Esri World Imagery"),
+    });
     this.viewer = new Cesium.Viewer(container, {
       creditContainer: this.creditContainer,
+      baseLayer: new Cesium.ImageryLayer(imagery),
       baseLayerPicker: false,
       geocoder: false,
       homeButton: false,
@@ -50,41 +97,75 @@ export class DroneScene {
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
+      useDefaultRenderLoop: false,
+      showRenderLoopErrors: false,
+      msaaSamples: 4,
+      contextOptions: {
+        webgl: { antialias: true, powerPreference: "high-performance" },
+      },
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
     });
+    this.viewer.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
+    this.viewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
+    this.viewer.scene.screenSpaceCameraController.minimumZoomDistance = 1.5;
+    this.viewer.scene.screenSpaceCameraController.maximumZoomDistance = 2400;
+    this.viewer.scene.screenSpaceCameraController.inertiaZoom = 0.72;
+    this.viewer.scene.screenSpaceCameraController.inertiaSpin = 0.86;
+    this.viewer.scene.screenSpaceCameraController.inertiaTranslate = 0.8;
 
-    this.viewer.imageryLayers.addImageryProvider(
-      new Cesium.UrlTemplateImageryProvider({
-        url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        maximumLevel: 19,
-        credit: new Cesium.Credit("Esri World Imagery"),
-      }),
-    );
     const layer = this.viewer.imageryLayers.get(0);
-    layer.saturation = 0.92;
-    layer.brightness = 0.96;
+    layer.saturation = 0.9;
+    layer.brightness = 0.98;
     layer.contrast = 1.04;
-    this.viewer.imageryLayers.addImageryProvider(
-      new Cesium.UrlTemplateImageryProvider({
-        url: "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-        maximumLevel: 19,
-      }),
-    );
 
     const scene = this.viewer.scene;
-    scene.globe.baseColor = css("#0a1220");
+    scene.globe.baseColor = css("#87968f");
+    // La iluminación dinámica del globo multiplicaba el satelital por ~0,3:
+    // la ciudad se veía en penumbra (medido: 45/255 con luz vs 135 sin ella).
+    // Se desactiva; las sombras reales (shadowMap) de dron y edificios siguen
+    // funcionando, que es la profundidad que importa.
     scene.globe.enableLighting = false;
+    scene.globe.dynamicAtmosphereLighting = true;
+    scene.globe.dynamicAtmosphereLightingFromSun = true;
     scene.globe.showGroundAtmosphere = true;
+    scene.globe.depthTestAgainstTerrain = true;
     scene.fog.enabled = true;
-    scene.fog.density = 0.00006;
+    scene.fog.density = 0.00012;
+    scene.fog.minimumBrightness = 0.1;
     scene.postProcessStages.fxaa.enabled = true;
+
+    // Sombra real: sin esto el dron parece flotar sobre la ciudad.
+    scene.shadowMap.enabled = true;
+    scene.shadowMap.softShadows = true;
+    scene.shadowMap.darkness = 0.32;
+    scene.shadowMap.size = 2048;
+    scene.shadowMap.maximumDistance = 4500;
+
+    // Bloom: los materiales emisivos del dron y la polilínea brillante no
+    // existen visualmente sin esta etapa.
+    const bloom = scene.postProcessStages.bloom;
+    bloom.enabled = true;
+    bloom.uniforms.glowOnly = false;
+    bloom.uniforms.contrast = 128;
+    bloom.uniforms.brightness = -0.32;
+    bloom.uniforms.delta = 1.0;
+    bloom.uniforms.sigma = 3.8;
+    bloom.uniforms.stepSize = 1.2;
+
+    // SSAO desactivado a propósito: combinado con shadowMap deja el 91 % del
+    // frame en negro en esta versión de Cesium (medido). Sombras + bloom ya
+    // dan la profundidad; no compensa el riesgo.
+    scene.postProcessStages.ambientOcclusion.enabled = false;
+
     if (scene.skyAtmosphere) {
-      scene.skyAtmosphere.hueShift = -0.03;
-      scene.skyAtmosphere.saturationShift = -0.3;
-      scene.skyAtmosphere.brightnessShift = -0.12;
+      scene.skyAtmosphere.hueShift = 0;
+      scene.skyAtmosphere.saturationShift = 0;
+      scene.skyAtmosphere.brightnessShift = 0;
     }
-    scene.backgroundColor = css("#050a14");
-    this.viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-10-21T15:00:00Z");
+    scene.backgroundColor = css("#a8c5d8");
+    // 15:30 en Bucaramanga (UTC-5): sol con altura suficiente para modelar el
+    // dron y a las personas, y todavía con sombras largas y cálidas.
+    this.viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-10-21T20:30:00Z");
 
     const frustum = this.viewer.camera.frustum;
     if (frustum instanceof Cesium.PerspectiveFrustum) {
@@ -93,28 +174,61 @@ export class DroneScene {
 
     this.world = createWorldFrame();
     this.world.setGround(CITY_GROUND_HEIGHT, true);
-    scene.globe.show = false;
+    this.terrain = new TerrainSampling(this.viewer, this.world);
     this.addBeacons();
     this.drone = new DroneModel(this.viewer, this.world);
+    this.cameraRig = new CameraRig(this.viewer, this.world, this.terrain);
+    this.missionDirector = new MissionDirector(
+      this.viewer,
+      this.world,
+      (state) => this.missionCallback?.(state),
+      (hold) => this.holdCallback?.(hold),
+    );
     void this.loadCity();
 
     this.preRenderHandler = () => this.preRender();
     scene.preRender.addEventListener(this.preRenderHandler);
     this.cameraUnlockAt = performance.now() + INITIAL_DURATION_MS;
 
-    this.resizeObserver = new ResizeObserver(() => {
-      this.viewer.resize();
-    });
+    this.resizeObserver = new ResizeObserver(() => this.viewer.resize());
     this.resizeObserver.observe(container);
+    this.startRenderLoop();
+
+    if (import.meta.env.DEV) {
+      (window as unknown as Record<string, unknown>).__dronScene = this;
+      // Diagnóstico en desarrollo: cambia la hora del sol sin tocar código.
+      (window as unknown as Record<string, unknown>).__setSun = (iso: string) => {
+        this.viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(iso);
+      };
+      // Diagnóstico en desarrollo: reconstruye el primitivo de edificios con el
+      // terreno ya cargado. Sirve para detectar si se hornearon con alturas de
+      // baja resolución.
+      (window as unknown as Record<string, unknown>).__reloadBuildings = async () => {
+        if (this.cityPrimitive) {
+          this.viewer.scene.primitives.remove(this.cityPrimitive);
+          this.cityPrimitive = null;
+        }
+        this.cityPrimitive = await loadBuildingPrimitive(
+          this.viewer,
+          this.world,
+          this.viewer.terrainProvider,
+        );
+        return !!this.cityPrimitive;
+      };
+    }
   }
 
   private addBeacons(): void {
-    for (const entity of this.decorations) {
-      this.viewer.entities.remove(entity);
-    }
+    for (const entity of this.decorations) this.viewer.entities.remove(entity);
     this.decorations = [];
-    this.addBeacon([0, 0, 0], "UTS", "Despegue", COLORS.green);
-    this.addBeacon(routeFrame.displacement, "UIS", "Entrega", COLORS.orange);
+    this.addBeacon([0, 0, 0], "UTS", "Despegue", COLORS.green, MISSION_ZONES.uts.radius);
+    this.addBeacon(
+      routeFrame.displacement,
+      "UIS",
+      "Entrega",
+      COLORS.orange,
+      MISSION_ZONES.uis.radius,
+    );
   }
 
   private addBeacon(
@@ -122,6 +236,7 @@ export class DroneScene {
     title: string,
     subtitle: string,
     color: string,
+    radius: number,
   ): void {
     const ground = this.world.ground(vector);
     const top = this.world.enu([vector[0], vector[1], 6]);
@@ -129,14 +244,13 @@ export class DroneScene {
       this.viewer.entities.add({
         position: ground,
         ellipse: {
-          semiMajorAxis: 3.2,
-          semiMinorAxis: 3.2,
-          material: css(color, 0.1),
+          semiMajorAxis: radius,
+          semiMinorAxis: radius,
+          material: css(color, 0.12),
           outline: true,
-          outlineColor: css(color, 0.8),
+          outlineColor: css(color, 0.85),
           height: new Cesium.CallbackProperty(
-            () =>
-              (Cesium.Cartographic.fromCartesian(ground)?.height ?? 0) + 0.12,
+            () => (Cesium.Cartographic.fromCartesian(ground)?.height ?? 0) + 0.12,
             false,
           ),
         },
@@ -167,116 +281,76 @@ export class DroneScene {
   }
 
   private refreshGround(): void {
-    this.world.setGround(CITY_GROUND_HEIGHT, true);
     this.addBeacons();
     this.drawRoute();
     this.drone.clearTrail();
   }
 
   private async loadCity(): Promise<void> {
-    const key = import.meta.env.VITE_GOOGLE_3D_TILES_KEY as string | undefined;
+    let terrainReady = false;
     try {
-      const tileset = await Cesium.createGooglePhotorealistic3DTileset(
-        key ? { key } : undefined,
-        { maximumScreenSpaceError: 10 },
-      );
-      if (this.destroyed) {
-        tileset.destroy();
-        return;
-      }
-      this.cityTileset = tileset;
-      this.viewer.scene.primitives.add(tileset);
-      this.viewer.scene.globe.show = false;
-      this.refreshGround();
-      await this.loadBuildings();
-      return;
+      const terrain = await Cesium.createWorldTerrainAsync({ requestVertexNormals: true });
+      if (this.destroyed) return;
+      this.viewer.terrainProvider = terrain;
+      this.viewer.scene.globe.show = true;
+      terrainReady = true;
+      await this.anchorToTerrain(terrain);
     } catch (error) {
-      console.warn("Google 3D Tiles no disponible; se intenta OSM Buildings", error);
+      console.warn("Terreno Cesium no disponible; se usa el plano local", error);
+      this.world.setGround(0, false);
+      this.viewer.scene.globe.show = true;
+      this.refreshGround();
     }
 
-    try {
-      const buildings = await Cesium.createOsmBuildingsAsync({
-        defaultColor: Cesium.Color.fromCssColorString("#c3ccd6"),
-      });
-      if (this.destroyed) {
-        buildings.destroy();
-        return;
-      }
-      this.cityTileset = buildings;
-      this.viewer.scene.primitives.add(buildings);
-      this.viewer.scene.globe.show = false;
-      this.refreshGround();
-      await this.loadBuildings();
-      return;
-    } catch (error) {
-      console.warn("OSM Buildings no disponible; se usan extrusions locales", error);
-    }
+    this.cityPrimitive = await loadBuildingPrimitive(
+      this.viewer,
+      this.world,
+      terrainReady ? this.viewer.terrainProvider : undefined,
+    );
+    if (this.destroyed) return;
 
-    this.world.setGround(0, false);
-    this.viewer.scene.globe.show = true;
-    this.addBeacons();
-    this.drawRoute();
-    this.drone.clearTrail();
-    await this.loadBuildings();
+    if (!this.cityPrimitive && terrainReady) {
+      try {
+        const buildings = await Cesium.createOsmBuildingsAsync({
+          defaultColor: Cesium.Color.fromCssColorString("#b8b0a3"),
+        });
+        if (this.destroyed) {
+          buildings.destroy();
+          return;
+        }
+        this.osmBuildings = buildings;
+        this.viewer.scene.primitives.add(buildings);
+      } catch (error) {
+        console.warn("OSM Buildings no disponible", error);
+      }
+    }
   }
 
-  private async loadBuildings(): Promise<void> {
+  /**
+   * Recalibra el ancla ENU con la altura real del terreno en la UTS.
+   * `CITY_GROUND_HEIGHT` es solo un valor de arranque: el terreno de Cesium
+   * puede diferir varios metros y con eso el dron aparecía enterrado.
+   */
+  private async anchorToTerrain(terrain: Cesium.TerrainProvider): Promise<void> {
+    const carto = Cesium.Cartographic.fromCartesian(this.world.origin);
+    if (!carto) return;
     try {
-      const dataSource = await Cesium.GeoJsonDataSource.load("/api/buildings", {
-        clampToGround: false,
-        credit: "OpenStreetMap contributors",
-      });
+      const samples = await Cesium.sampleTerrainMostDetailed(terrain, [
+        carto.clone() as Cesium.Cartographic,
+      ]);
+      const sample = samples[0];
+      if (this.destroyed || !sample || !Number.isFinite(sample.height)) return;
+      this.world.setGround(sample.height, true);
+      // A partir de aquí todo el marco ENU (edificios, zonas, repartidores,
+      // ruta, balizas y dron) se apoya en el terreno que se ve, no en la
+      // rejilla offline, que en la UTS estaba desviada ~10 m.
+      this.world.setHeightProvider((vector) => this.terrain.agl(vector));
+      await this.terrain.prewarm([[0, 0, 0], routeFrame.displacement]);
       if (this.destroyed) return;
-
-      const inverse = Cesium.Matrix4.inverse(this.world.matrix, new Cesium.Matrix4());
-      const scratch = new Cesium.Cartesian3();
-      const now = Cesium.JulianDate.now();
-      const destination = routeFrame.displacement;
-      const exclusion = 120;
-      const local = (center: Cesium.Cartesian3): Vec3 => {
-        const point = Cesium.Matrix4.multiplyByPoint(inverse, center, scratch);
-        return [point.x, point.y, 0];
-      };
-
-      for (const entity of dataSource.entities.values) {
-        const polygon = entity.polygon;
-        if (!polygon) continue;
-        const rawHeight = entity.properties?.height?.getValue(now);
-        const height = typeof rawHeight === "number" && rawHeight > 0 ? rawHeight : 9;
-        if (height > 40) continue;
-        const seed = String(entity.id)
-          .split("")
-          .reduce((total, character) => total + character.charCodeAt(0), 0);
-        const shade = 0.4 + ((seed % 13) / 13) * 0.16;
-
-        const hierarchy = polygon.hierarchy?.getValue(now);
-        const positions = hierarchy?.positions;
-        const center =
-          positions && positions.length > 0
-            ? Cesium.BoundingSphere.fromPoints(positions).center
-            : Cesium.Cartesian3.ZERO;
-        const point = local(center);
-        if (Math.hypot(point[0], point[1]) < exclusion) continue;
-        if (Math.hypot(point[0] - destination[0], point[1] - destination[1]) < exclusion) {
-          continue;
-        }
-        const ground = this.world.heightAt(point);
-
-        polygon.height = new Cesium.ConstantProperty(ground + 0.15);
-        polygon.extrudedHeight = new Cesium.ConstantProperty(ground + height);
-        polygon.material = new Cesium.ColorMaterialProperty(
-          Cesium.Color.fromHsl(0.58 + ((seed % 7) / 7) * 0.03, 0.14, shade, 0.82),
-        );
-        polygon.outline = new Cesium.ConstantProperty(true);
-        polygon.outlineColor = new Cesium.ConstantProperty(
-          Cesium.Color.fromCssColorString("#0f172a").withAlpha(0.35),
-        );
-      }
-
-      this.buildings = dataSource;
-      await this.viewer.dataSources.add(dataSource);
-    } catch {
-      this.buildings = null;
+      this.refreshGround();
+      this.missionDirector?.refreshZones();
+    } catch (error) {
+      console.warn("No se pudo recalibrar el ancla con el terreno real", error);
     }
   }
 
@@ -284,47 +358,67 @@ export class DroneScene {
     this.buffer = buffer;
   }
 
+  attachMissionState(listener: (state: MissionState) => void): void {
+    this.missionCallback = listener;
+  }
+
+  attachHold(listener: (hold: boolean) => void): void {
+    this.holdCallback = listener;
+  }
+
   setRoute(route: readonly Vec3[]): void {
     this.route = route;
+    this.missionDirector?.reset();
     const positions = this.drawRoute();
     if (!positions || positions.length < 2) return;
 
     this.drone.clearTrail();
     const sphere = Cesium.BoundingSphere.fromPoints(positions);
     this.viewer.camera.flyToBoundingSphere(new Cesium.BoundingSphere(sphere.center, 1200), {
-      offset: new Cesium.HeadingPitchRange(Cesium.Math.toRadians(-20), Cesium.Math.toRadians(-38), 3600),
+      offset: new Cesium.HeadingPitchRange(
+        Cesium.Math.toRadians(-20),
+        Cesium.Math.toRadians(-38),
+        3200,
+      ),
       duration: INITIAL_DURATION_MS / 1000,
     });
     this.cameraUnlockAt = performance.now() + CAMERA_SETTLE_MS;
   }
 
   private drawRoute(): Cesium.Cartesian3[] | null {
-    for (const entity of this.routeEntities) {
-      this.viewer.entities.remove(entity);
-    }
+    for (const entity of this.routeEntities) this.viewer.entities.remove(entity);
     this.routeEntities = [];
-
     if (this.route.length < 2) return null;
 
-    const positions = this.route.map((point) => this.world.enu(point));
+    // La ruta incluye los tramos verticales de ascenso y descenso (mismo
+    // punto norte-este con distinto z). Al dibujarse quedaban como un mástil
+    // cian clavado al dron: se omiten los tramos sin desplazamiento horizontal.
+    const kept: Vec3[] = [];
+    for (const point of this.route) {
+      const previous = kept[kept.length - 1];
+      if (previous && Math.hypot(point[0] - previous[0], point[1] - previous[1]) < 8) continue;
+      kept.push(point);
+    }
+    const positions = kept.map((point) => this.world.enu(point));
+
     this.routeEntities.push(
       this.viewer.entities.add({
         polyline: {
           positions,
-          width: 4,
+          width: 3,
           material: new Cesium.PolylineGlowMaterialProperty({
-            glowPower: 0.2,
-            color: css(COLORS.accent, 0.9),
+            glowPower: 0.18,
+            color: css(COLORS.accent, 0.78),
           }),
           arcType: Cesium.ArcType.NONE,
         },
       }),
       this.viewer.entities.add({
         polyline: {
-          positions: this.route.map((point) => this.world.ground(point)),
-          width: 2,
+          positions: kept.map((point) => this.world.ground(point)),
+          width: 1.5,
           material: new Cesium.PolylineDashMaterialProperty({
-            color: css(COLORS.accent, 0.35),
+            color: css(COLORS.accent, 0.28),
             dashLength: 18,
           }),
           arcType: Cesium.ArcType.NONE,
@@ -345,38 +439,28 @@ export class DroneScene {
         }),
       );
     }
-
     return positions;
   }
 
   setCameraMode(mode: CameraMode): void {
-    this.cameraMode = mode;
-    if (mode !== "free") {
-      this.cameraUnlockAt = performance.now();
-    } else {
-      this.viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-    }
+    this.cameraRig.setMode(mode);
   }
 
-  private placeCamera(position: Cesium.Cartesian3, target: Cesium.Cartesian3): void {
-    const camera = this.viewer.camera;
-    const direction = Cesium.Cartesian3.subtract(target, position, new Cesium.Cartesian3());
-    const length = Cesium.Cartesian3.magnitude(direction);
-    if (length < 1e-3) return;
-    Cesium.Cartesian3.normalize(direction, direction);
-
-    const transform = Cesium.Transforms.eastNorthUpToFixedFrame(position);
-    const inverse = Cesium.Matrix4.inverse(transform, new Cesium.Matrix4());
-    const local = Cesium.Matrix4.multiplyByPointAsVector(
-      inverse,
-      direction,
-      new Cesium.Cartesian3(),
-    );
-    Cesium.Cartesian3.normalize(local, local);
-
-    const heading = Math.atan2(local.x, local.y);
-    const pitch = Math.asin(Cesium.Math.clamp(local.z, -1, 1));
-    camera.setView({ destination: position, orientation: { heading, pitch, roll: 0 } });
+  /** Plano fijo de la secuencia: encuadra dron y repartidor a escala humana. */
+  private applyShot(shot: CameraShot): void {
+    const display = this.drone.displayPosition;
+    const position = this.world.enu([
+      display[0] + shot.position[0],
+      display[1] + shot.position[1],
+      display[2] + shot.position[2],
+    ]);
+    const target = this.world.enu([
+      display[0] + shot.target[0],
+      display[1] + shot.target[1],
+      display[2] + shot.target[2],
+    ]);
+    this.shotActive = true;
+    this.cameraRig.placeCamera(position, target);
   }
 
   private preRender(): void {
@@ -385,63 +469,51 @@ export class DroneScene {
     if (!sample) return;
 
     const now = performance.now();
-    this.drone.update(sample);
+    // Mantiene el muestreo del terreno real al día mientras el dron se mueve.
+    this.terrain.request(sample.position);
 
-    if (now < this.cameraUnlockAt) return;
+    const hoverOverride = this.missionDirector?.hoverZ(sample) ?? null;
+    this.drone.update(sample, hoverOverride);
 
-    const heading = Cesium.Math.toRadians(sample.headingDeg);
+    const ready = now >= this.cameraUnlockAt;
+    this.missionDirector?.update(sample, now, this.drone.bellyPoint(), ready);
 
-    const p = sample.position;
-    switch (this.cameraMode) {
-      case "chase": {
-        const forward = heading;
-        const offset: Vec3 = [
-          p[0] - Math.sin(forward) * CHASE_DISTANCE + Math.cos(forward) * CHASE_SIDE,
-          p[1] - Math.cos(forward) * CHASE_DISTANCE - Math.sin(forward) * CHASE_SIDE,
-          p[2] + CHASE_HEIGHT,
-        ];
-        const look: Vec3 = [
-          p[0] + Math.sin(forward) * 7,
-          p[1] + Math.cos(forward) * 7,
-          p[2] + 1.8,
-        ];
-        this.placeCamera(this.world.enu(offset), this.world.enu(look));
-        break;
-      }
-      case "orbit": {
-        const angle = now * 0.00012;
-        const radius = 13;
-        const offset: Vec3 = [
-          p[0] + Math.cos(angle) * radius,
-          p[1] + Math.sin(angle) * radius,
-          p[2] + 7.5,
-        ];
-        this.placeCamera(this.world.enu(offset), this.world.enu([p[0], p[1], p[2] + 1.4]));
-        break;
-      }
-      case "top": {
-        const position = this.world.enu([p[0] + 0.2, p[1], p[2] + 80]);
-        this.placeCamera(position, this.world.enu([p[0], p[1], p[2]]));
-        break;
-      }
-      case "free":
-        break;
+    const shot = this.missionDirector?.shot() ?? null;
+    if (shot) {
+      this.applyShot(shot);
+      return;
     }
+
+    if (this.shotActive) {
+      this.shotActive = false;
+      this.cameraUnlockAt = now;
+      this.cameraRig.beginFollow(now);
+    }
+    if (now < this.cameraUnlockAt) return;
+    if (!this.cameraFollowing) {
+      this.cameraFollowing = true;
+      this.cameraRig.beginFollow(now);
+    }
+    this.cameraRig.update(sample, now);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.stopRenderLoop();
     this.resizeObserver.disconnect();
     this.viewer.scene.preRender.removeEventListener(this.preRenderHandler);
     this.drone.destroy();
-    if (this.cityTileset) {
-      this.viewer.scene.primitives.remove(this.cityTileset);
-      this.cityTileset = null;
+    this.cameraRig.destroy();
+    this.missionDirector?.destroy();
+    this.missionDirector = null;
+    if (this.cityPrimitive) {
+      this.viewer.scene.primitives.remove(this.cityPrimitive);
+      this.cityPrimitive = null;
     }
-    if (this.buildings) {
-      this.viewer.dataSources.remove(this.buildings, true);
-      this.buildings = null;
+    if (this.osmBuildings) {
+      this.viewer.scene.primitives.remove(this.osmBuildings);
+      this.osmBuildings = null;
     }
     for (const entity of [...this.decorations, ...this.routeEntities]) {
       this.viewer.entities.remove(entity);

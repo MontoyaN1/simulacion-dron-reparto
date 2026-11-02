@@ -52,6 +52,11 @@ export interface WorldFrame {
   readonly ground: (vector: Vec3) => Cesium.Cartesian3;
   readonly offset: (vector: Vec3, dz: number) => Cesium.Cartesian3;
   readonly setGround: (baseMeters: number, terrain: boolean) => void;
+  /**
+   * Fuente de elevación real. Si devuelve un número finito se usa en lugar de
+   * la rejilla offline; devuelve `null` para conservar la rejilla.
+   */
+  readonly setHeightProvider: (provider: ((vector: Vec3) => number | null) | null) => void;
   readonly heightAt: (vector: Vec3) => number;
   readonly baseHeight: number;
 }
@@ -66,9 +71,16 @@ export const createWorldFrame = (): WorldFrame => {
 
   let baseHeight = BASE_ALTITUDE_METERS;
   let useTerrain = false;
+  let provider: ((vector: Vec3) => number | null) | null = null;
 
-  const height = (vector: Vec3): number =>
-    baseHeight + (useTerrain ? routeGroundHeight(vector) : 0);
+  const height = (vector: Vec3): number => {
+    if (useTerrain) {
+      const real = provider?.(vector);
+      if (typeof real === "number" && Number.isFinite(real)) return baseHeight + real;
+      return baseHeight + routeGroundHeight(vector);
+    }
+    return baseHeight;
+  };
 
   const project = (vector: Vec3, dz = 0): Cesium.Cartesian3 =>
     Cesium.Matrix4.multiplyByPoint(
@@ -93,6 +105,9 @@ export const createWorldFrame = (): WorldFrame => {
     setGround: (baseMeters, terrain) => {
       baseHeight = baseMeters;
       useTerrain = terrain;
+    },
+    setHeightProvider: (next) => {
+      provider = next;
     },
     heightAt: (vector) => height(vector),
     get baseHeight() {
