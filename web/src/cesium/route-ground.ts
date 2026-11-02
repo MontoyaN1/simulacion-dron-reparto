@@ -1,5 +1,6 @@
 import * as Cesium from "cesium";
 import { routeFrame, type Vec3 } from "@dron/shared";
+import corridorDataset from "./corridor-ground.json";
 import type { WorldFrame } from "./world";
 
 /**
@@ -48,9 +49,23 @@ export class RouteGroundTable {
     return this.ready;
   }
 
-  /** Muestrea el corredor o restaura la copia guardada en `localStorage`. */
+  /** 
+   * Carga el corredor: el archivo versionado se aplica de una (sin red,
+   * sin muestreo al vuelo, el arranque ya no espera un minuto); si falta
+   * cobertura se re-muestrea en vivo y se guarda en `localStorage`.
+   */
   async cargar({ world, terrain }: RouteGroundOptions): Promise<void> {
     if (this.ready) return;
+    const esperadas = (this.filasAlong + 1) * LATERAL.length;
+    const delArchivo = (corridorDataset as { v?: number; datos?: [number, number, number][] }).datos ?? [];
+    for (const [alongIndex, lateralIndex, altura] of delArchivo) {
+      if (alongIndex > this.filasAlong || lateralIndex < 0 || lateralIndex >= LATERAL.length) continue;
+      this.grid.set(clave(alongIndex, lateralIndex), altura);
+    }
+    if (this.grid.size >= esperadas * 0.6) {
+      this.ready = true;
+      return;
+    }
     const guardada = RouteGroundTable.leerCache();
     if (guardada) {
       for (const [alongIndex, lateralIndex, altura] of guardada) {
