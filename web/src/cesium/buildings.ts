@@ -27,7 +27,7 @@ interface BuildingFeature {
 
 const PALETTE = ["#b8b0a3", "#a89583", "#b6bfc3", "#c0b39b", "#9fa9ad", "#b99a86"];
 
-const pointInside = (point: readonly number[], ring: readonly Vec3[]): boolean => {
+export const pointInside = (point: readonly number[], ring: readonly Vec3[]): boolean => {
   let inside = false;
   for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
     const a = ring[index];

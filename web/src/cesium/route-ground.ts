@@ -34,7 +34,8 @@ const clave = (alongIndex: number, lateralIndex: number): number =>
 
 export interface RouteGroundOptions {
   readonly world: WorldFrame;
-  readonly terrain: Cesium.TerrainProvider;
+  /** Opcional: el muestreo vivo usa ion; el archivo versionado no lo necesita. */
+  readonly terrain?: Cesium.TerrainProvider;
 }
 
 const CACHE_VERSION = 2;
@@ -96,6 +97,7 @@ export class RouteGroundTable {
       });
     }
     if (cartos.length < 50) throw new Error("Corredor insuficiente para muestrear");
+    if (!terrain) throw new Error("Sin proveedor de terreno para muestrear");
 
     const samples = await Cesium.sampleTerrainMostDetailed(terrain, cartos);
     samples.forEach((sample, index) => {

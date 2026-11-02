@@ -1022,3 +1022,28 @@ main {
     align-items: flex-start;
   }
 }
+
+.fps-panel {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(4, 12, 24, 0.72);
+  border: 1px solid rgba(148, 226, 255, 0.25);
+  color: #c8e9ff;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.fps-panel .fps-valor {
+  font-weight: 700;
+  color: #8ff0ff;
+  text-transform: none;
+}
