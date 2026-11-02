@@ -138,7 +138,95 @@ Propiedades verificadas en `shared/test/matrix.test.ts`:
 npm test
 ```
 
-Las 29 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
+Las 44 pruebas cubren suma y producto interno, norma y ángulo, proyección y componente
 rechazada, determinante e inversa, rango, núcleo e imagen, idempotencia de `P`, ortogonalidad
-de `R`, conversión ECEF/ENU ida y vuelta, distancia y rumbo UTS-UIS, y la conservación de la
-norma `√20` en el marco académico.
+de `R`, conversión ECEF/ENU ida y vuelta, distancia y rumbo UTS-UIS, conservación de la norma
+`√20` en el marco académico, la planeación A* (ruta directa, rodeo de obstáculos, edificios
+bajos y respaldo sin paso) y el panel en vivo (reconstrucción por combinación lineal,
+invariancia de la norma bajo `R` y rumbo de respaldo sin velocidad horizontal).
+
+## 8. Planeación de la ruta con A*
+
+Las huellas de edificios se descargan una vez con `scripts/fetch-buildings.mjs` desde Overpass y
+se recortan a 450 m alrededor de la recta UTS-UIS. La altura de cada edificio es `height` de OSM
+o, si falta, `3.2·building:levels + 1.5` metros.
+
+La rejilla de búsqueda usa celdas de 10 m sobre el rectángulo que encierra origen y destino más
+320 m de margen. Una celda queda bloqueada si su centro cae dentro de la huella dilatada 8 m de
+un edificio cuya altura alcanza el nivel de crucero con margen de seguridad:
+
+```
+h_edificio ≥ z_crucero − margen = 50 − 12 = 38 m
+```
+
+El costo de A* es 1 entre celdas ortogonales y `√2` en diagonal, con heurística octile
+
+```
+h(n) = Δx + Δy + (√2 − 2)·min(Δx, Δy)
+```
+
+que es admisible y consistente porque nunca sobreestima el costo real en la rejilla. Se prohíbe
+cortar esquinas en diagonal y, al reconstruir, un suavizado por visibilidad (string pulling)
+elimina los zigzag de la rejilla comprobando que el segmento no cruce celdas bloqueadas.
+
+La ruta que consume el motor es
+
+```
+[UTS, UTS + (0,0,50), waypoints…, UIS + (0,0,50), UIS]
+```
+
+de modo que el despegue y el descenso son verticales y el crucero conserva 50 m AGL. El desvío se
+mide como `longitud(A*) / ‖UIS − UTS‖` y se publica en `GET /api/route`.
+
+Trazabilidad: `data/buildings.geojson`, `shared/src/planning/{grid,astar,plan}.ts`,
+`server/src/sim/buildings.ts` y `web/src/cesium/scene.ts` (extrusión en Cesium).
+
+## 9. Panel de álgebra en vivo
+
+Cada mensaje de telemetría (15 Hz) alimenta `liveAlgebra` en `shared/src/live.ts`, que publica
+los valores de los 11 temas:
+
+- **Vectores**: `p = (x, y, z)` y `‖p‖`.
+- **Recta**: `L(t) = p + t·ĥ`, con `ĥ` la dirección horizontal unitaria de la velocidad.
+- **Plano**: el plano de crucero `z = h` y su distancia al dron.
+- **Producto interno**: `v · n̂` con `n̂ = (0, 1, 0)`, y el rumbo `atan2(ĥ_x, ĥ_y)`.
+- **Proyecciones**: `P·p = (x, y, 0)` con `P = diag(1, 1, 0)`.
+- **Subespacios**: `H = {v : v_z = 0}`, de dimensión 2.
+- **Espacio generado**: `span{ĥ, r̂, k̂}` con `r̂ = k̂ × ĥ`; su determinante es 1.
+- **Combinaciones lineales**: `p = a·ĥ + b·r̂ + c·k̂` con `a = p·ĥ`, `b = p·r̂`, `c = p_z`.
+  La reconstrucción se comprueba en vivo (`error < 10⁻⁹`).
+- **Transformaciones**: `T(v) = R·v` y la verificación `‖R·v‖ = ‖v‖`.
+- **Núcleo e imagen**: `ker P = ⟨k̂⟩` (nulidad 1) e `Im P = plano xy` (rango 2).
+- **Matriz, rango e isomorfismo**: `det(R) = 1` y `rango(R) = 3`, luego `R` es isomorfismo.
+
+La tabla de datos muestrea la telemetría a 1 Hz (30 filas) con `t`, fase, posición, velocidad y
+batería. Trazabilidad: `shared/src/live.ts`, `web/src/components/DetailsSection.tsx` y
+`web/src/components/DataTable.tsx`.
+
+## 10. Escena 3D y perfil de elevación
+
+La simulación matemática vive en el plano ENU con `z` medido sobre el suelo de la UTS. La escena
+fotogramétrica, en cambio, está georreferenciada a la cota real del terreno. Para unirlas sin
+alterar la telemetría se aplica una traslación visual:
+
+```
+q_escena = O + R_ENU · (x, y, z + H₀ + h_perfil(x, y))
+```
+
+donde `O` es el origen geodésico de la UTS, `R_ENU` la rotación este-norte-arriba, `H₀ = 938,5 m`
+la cota de la UTS y `h_perfil` un perfil relativo muestreado cada ~100 m a lo largo de la ruta
+(Open-Elevation). Es una transformación afín que no cambia distancias horizontales, rumbos ni la
+norma académica: solo desplaza verticalmente la representación. Así el dron aterriza sobre la
+cota real de la UIS aunque el modelo siga usando `z = 0` como suelo local.
+
+La cámara se reconstruye con `setView` a partir de la posición interpolada y un desplazamiento
+fijo por modo (persecución, órbita, cenital); la orientación se obtiene proyectando la dirección
+al objetivo en el marco ENU de la cámara:
+
+```
+heading = atan2(d_este, d_norte),   pitch = asin(d_arriba)
+```
+
+Esto elimina la realimentación de `lookAt` que producía el temblor vertical por fotograma.
+Trazabilidad: `web/src/cesium/world.ts`, `web/src/cesium/scene.ts`,
+`web/src/cesium/drone.ts` y `web/src/cesium/terrain-grid.ts`.

@@ -5,25 +5,30 @@ Tecnológicas de Santander (UTS) hasta la Universidad Industrial de Santander (U
 Bucaramanga, con telemetría en vivo y el cálculo de los temas de Álgebra Lineal del
 documento de la propuesta.
 
-**Estado actual: fase 0 completada.** El repositorio ya trae el monorepo, el marco de
-coordenadas reales UTS-UIS, la librería de álgebra lineal con pruebas y una página de
-verificación que consume la API. La escena 3D con CesiumJS entra en la fase 2.
+**Estado actual: fase 4 completada.** El repositorio trae el monorepo, el marco de coordenadas
+reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista,
+telemetría en vivo por WebSocket, una escena 3D con CesiumJS (ciudad fotogramétrica de Google,
+dron detallado, estela y cuatro cámaras), la ciudad con edificios de OpenStreetMap extruidos y
+ruta planificada con A* sobre una rejilla de 10 m, y el panel de álgebra en vivo: los 11 temas
+del documento con sus valores calculados en cada muestra y una tabla de datos a 1 Hz.
 
 ## Stack
 
 | Capa | Tecnología |
 | --- | --- |
-| Motor y API | Node 22 · TypeScript · Fastify · `ws` (fase 1) |
-| Cliente | Vite · React 19 · CesiumJS (fase 2) |
+| Motor y API | Node 22 · TypeScript · Fastify · `ws` |
+| Cliente | Vite · React 19 · CesiumJS 1.146 |
 | Matemática | `shared/` sin dependencias, probada con `node:test` |
 | Historial | `node:sqlite` (fase 6, sin binarios nativos) |
 
 ## Estructura
 
 ```
-shared/   vectores, matrices, geometría, coordenadas y marco de la ruta
-server/   API HTTP (y más adelante el motor de simulación por WebSocket)
-web/      interfaz React + Vite
+shared/   vectores, matrices, geometría, coordenadas, ruta y planeación A*
+server/   API HTTP, motor de simulación y carga de edificios
+web/      interfaz React + Vite; la escena Cesium vive en web/src/cesium
+scripts/  descarga y recorte de edificios desde Overpass
+data/     buildings.geojson versionado (718 edificios del corredor)
 docs/     modelo matemático y trazabilidad con el documento
 ```
 
@@ -36,19 +41,43 @@ docs/     modelo matemático y trazabilidad con el documento
 
 ```bash
 npm install      # instala los tres workspaces
-npm run dev      # API en :3100 y web en :5173
-npm run check    # typecheck + pruebas
-npm test         # solo pruebas de la librería matemática
-npm run build    # build de producción del cliente
+npm run dev      # API en :3100 y web en :5173 (copia antes los assets de Cesium)
+npm run check        # typecheck + pruebas
+npm test             # pruebas de la librería y del motor
+npm run sim -w server # vuelo headless con tabla de telemetría
+npm run fetch:buildings # actualiza data/buildings.geojson desde Overpass
+npm run build        # build de producción del cliente
 ```
 
 La API queda en `http://localhost:3100` y el cliente en `http://localhost:5173`. El puerto
-de la API se puede cambiar con `PORT=otro npm run dev`.
+de la API se puede cambiar con `PORT=otro npm run dev`. Los assets de Cesium (`Workers`,
+`Assets`, `Widgets`, `ThirdParty`) se copian a `web/public/cesium` con
+`web/scripts/copy-cesium.mjs` antes de `dev` y `build`; esa carpeta está ignorada por git.
 
-Endpoints disponibles en fase 0:
+La primera conexión abre el vuelo automáticamente. En la escena se puede pausar/reanudar,
+reiniciar, cambiar la velocidad (1×, 2×, 4×) y alternar entre las cámaras Persecución, Órbita,
+Cenital y Libre. La ciudad se carga en vivo: primero se intenta Google Photorealistic 3D Tiles
+(a través del token público de Cesium ion), luego OSM Buildings y, si no hay red, se usan las
+extrusiones locales de `data/buildings.geojson`.
+
+El marco ENU se ancla a la cota real de la UTS (`CITY_GROUND_HEIGHT = 938,5 m`). Para que el
+dron no quede enterrado cuando el terreno sube hacia la UIS, la escena suma un perfil de
+elevación relativo muestreado cada ~100 m con Open-Elevation (`web/src/cesium/terrain-grid.ts`).
+La telemetría y el modelo académico siguen en un plano ENU con `z = 0` en el suelo; solo la
+visualización aplica ese perfil. La cámara usa `camera.setView` con la telemetría interpolada y
+desplazamientos fijos por modo, en lugar de `camera.lookAt` por fotograma, para eliminar el
+temblor; el dron incluye cuerpo, brazos, rotores con aspas y disco de giro, tren de aterrizaje,
+gimbal, paquete, antena, luces y una oscilación de hover de pocos centímetros.
+
+Endpoints disponibles:
 
 - `GET /api/health`
 - `GET /api/frame` — campus, límites de operación y marco de la ruta
+- `GET /api/sim` — estado, telemetría y ruta actual
+- `GET /api/route` — polilínea planificada, estadísticas de A* y número de edificios
+- `GET /api/buildings` — GeoJSON de edificios del corredor
+- `POST /api/sim/action` — `start`, `pause`, `resume`, `reset`, `speed`
+- `WS /ws` — init, telemetría a 15 Hz, eventos y estado
 
 ## Coordenadas
 
@@ -67,10 +96,10 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 | Fase | Alcance | Estado |
 | --- | --- | --- |
 | 0 | Monorepo, marco de coordenadas, librería matemática | completada |
-| 1 | Motor determinista, telemetría y WebSocket | pendiente |
-| 2 | Escena CesiumJS, dron procedural y cámaras | pendiente |
-| 3 | Edificios OSM, rejilla y A* con altura | pendiente |
-| 4 | Panel en vivo con los 11 temas y tabla de datos | pendiente |
+| 1 | Motor determinista, telemetría y WebSocket | completada |
+| 2 | Escena CesiumJS, dron procedural y cámaras | completada |
+| 3 | Edificios OSM, rejilla y A* con altura | completada |
+| 4 | Panel en vivo con los 11 temas y tabla de datos | completada |
 | 5 | Decisiones por viento, zonas restringidas y batería | pendiente |
 | 6 | SQLite, replay y exportación CSV | pendiente |
 | 7 | Pulido, informe y guion de exposición | pendiente |
@@ -78,9 +107,12 @@ uniforme de **890.3 m por unidad**, de modo que la norma del desplazamiento sigu
 ## Datos y atribución
 
 Las coordenadas de los campus provienen de OpenStreetMap (© colaboradores de OpenStreetMap,
-ODbL 1.0) y se verificaron con Nominatim. En la fase 3 las huellas de edificios se descargan
-una sola vez y se recortan al corredor de vuelo; el archivo resultante se versiona para que la
-demo funcione sin conexión.
+ODbL 1.0) y se verificaron con Nominatim. Las huellas de los edificios se descargan una sola vez
+con `npm run fetch:buildings` desde Overpass, se recortan a 450 m de la recta UTS-UIS y se
+versionan en `data/buildings.geojson` (718 edificios); así el motor y la escena funcionan sin
+volver a consultar Overpass. Las teselas de Google Photorealistic 3D Tiles se usan mediante el
+token público de Cesium ion y se atribuyen en la esquina de la escena; la imagen base de
+respaldo es Esri World Imagery y el perfil de elevación se generó con Open-Elevation.
 
 ## Contexto académico
 

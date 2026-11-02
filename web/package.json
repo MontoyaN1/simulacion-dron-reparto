@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/copy-cesium.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/copy-cesium.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "cesium": "^1.146.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

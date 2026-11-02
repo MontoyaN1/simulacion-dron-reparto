@@ -16,7 +16,8 @@
     "build": "npm run build -w web",
     "typecheck": "npm run typecheck -w shared && npm run typecheck -w server && npm run typecheck -w web",
     "test": "npm run test -w shared",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "fetch:buildings": "node scripts/fetch-buildings.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
