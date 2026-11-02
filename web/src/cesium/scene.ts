@@ -36,7 +36,7 @@ export class DroneScene {
   private cameraUnlockAt = performance.now() + INITIAL_DURATION_MS;
   private cameraFollowing = false;
   private destroyed = false;
-  private cityPrimitive: Cesium.Primitive | null = null;
+  private cityPrimitive: Cesium.PrimitiveCollection | null = null;
   private osmBuildings: Cesium.Cesium3DTileset | null = null;
   private readonly resizeObserver: ResizeObserver;
   private readonly creditContainer: HTMLDivElement;
@@ -226,7 +226,9 @@ export class DroneScene {
     this.resizeObserver.observe(container);
     this.startRenderLoop();
 
-    if (import.meta.env.DEV) {
+    // Herramienta de diagnóstico remota: con `?debug` queda el manejador de la
+    // escena expuesto incluso en producción para poder medir sin dev.
+    if (import.meta.env.DEV || params.has("debug")) {
       (window as unknown as Record<string, unknown>).__dronScene = this;
       // Diagnóstico en desarrollo: cambia la hora del sol sin tocar código.
       (window as unknown as Record<string, unknown>).__setSun = (iso: string) => {
