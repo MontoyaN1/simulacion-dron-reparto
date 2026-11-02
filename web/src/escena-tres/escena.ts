@@ -49,7 +49,6 @@ export class EscenaTres {
 
   private buffer: EscenaBuffer | null = null;
   private onEstado: ((estado: MissionState) => void) | null = null;
-  private onHold: ((hold: boolean) => void) | null = null;
   private modo: CameraMode = "chase";
   private destruida = false;
   private lastFrame = performance.now();
@@ -107,11 +106,7 @@ export class EscenaTres {
     this.mundo.add(this.ruta);
     for (const objeto of this.etiquetasZona()) this.mundo.add(objeto);
 
-    this.mision = new MisionTres(
-      this.corredor,
-      (estado) => this.onEstado?.(estado),
-      (hold) => this.onHold?.(hold),
-    );
+    this.mision = new MisionTres(this.corredor, (estado) => this.onEstado?.(estado));
     for (const objeto of this.mision.objetos()) this.mundo.add(objeto);
 
     this.resizeObs = new ResizeObserver(() => this.redimension());
@@ -225,10 +220,6 @@ export class EscenaTres {
     this.onEstado = onEstado;
   }
 
-  attachHold(onHold: (hold: boolean) => void): void {
-    this.onHold = onHold;
-  }
-
   setRoute(ruta: readonly Vec3[]): void {    const puntos = ruta.map((punto) => {
       const agl = this.alturaSuelo([punto[0], punto[1], 0]);
       return enuATres(punto, agl + punto[2]);
@@ -338,51 +329,21 @@ export class EscenaTres {
       return;
     }
 
-    const listo = !this.camaraBloqueada;
     const display = this.displayDron(sample);
-    const belly = [
-      display[0],
-      display[1],
-      display[2] - 0.236,
-    ] as Vec3;
-    const puntoBelly = enuATres(belly, this.alturaSuelo(display) + display[2] - 0.236);
-    this.paquete.position.copy(puntoBelly);
-    this.sombraSuelo.position.set(display[0], this.alturaSuelo(display) + 0.25, display[1]);
-
-    this.mision.actualizar(sample, ahora, belly, listo);
-    const toma = this.mision.shot();
-    if (toma) {
-      const pos = enuATres(
-        [
-          display[0] + toma.position[0],
-          display[1] + toma.position[1],
-          display[2] + toma.position[2],
-        ],
-        this.alturaSuelo([
-          display[0] + toma.position[0],
-          display[1] + toma.position[1],
-          0,
-        ]) + display[2] + toma.position[2],
-      );
-      const mira = enuATres(
-        [
-          display[0] + toma.target[0],
-          display[1] + toma.target[1],
-          display[2] + toma.target[2],
-        ],
-        this.alturaSuelo([
-          display[0] + toma.target[0],
-          display[1] + toma.target[2],
-          0,
-        ]) + display[2] + toma.target[2],
-      );
-      this.camara.position.copy(pos);
-      this.camara.lookAt(mira);
-      this.actualizarDron(sample, dt);
-    } else {
-      this.camaraActualiza(sample, dt);
-      this.actualizarDron(sample, dt);
-    }
+    const aglDron = this.alturaSuelo(display);
+    const puntoBelly = enuATres(
+      [display[0], display[1], display[2] - 0.236],
+      aglDron + display[2] - 0.236,
+    );
+    this.mision.actualizarPaquete(sample, puntoBelly);
+    this.mision.fijarEstado(
+      sample,
+      Math.hypot(display[0] - routeFrame.displacement[0], display[1] - routeFrame.displacement[1]) < 18,
+      Math.hypot(display[0], display[1]) < 16,
+    );
+    this.sombraSuelo.position.set(display[0], aglDron + 0.25, display[1]);
+    this.actualizarDron(sample, dt);
+    this.camaraActualiza(sample, dt);
 
     this.renderer.render(this.mundo, this.camara);
   };

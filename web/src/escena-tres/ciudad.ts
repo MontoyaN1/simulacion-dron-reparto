@@ -146,9 +146,11 @@ const mallaTerreno = (corredor: RouteGroundTable): THREE.BufferGeometry => {
       const { lon, lat } = gradosDe(enu);
       const mercX = (lon + 180) / 360;
       const mercYv = mercatorY(lat);
+      // El canvas se dibuja con el tile del NORTE primero (flipY de three):
+      // v crece hacia el SUR. Antes estaba invertido y el mapa salía vacío.
       uvs.push(
         (mercX - plana.izq) / (plana.der - plana.izq),
-        (mercYv - plana.arriba) / (plana.abajo - plana.arriba === 0 ? 1 : plana.abajo - plana.arriba),
+        (plana.abajo - mercYv) / (plana.abajo - plana.arriba),
       );
     }
   }

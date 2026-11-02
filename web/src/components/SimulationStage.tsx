@@ -27,11 +27,10 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   const sendRef = useRef(send);
   const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
   const [missionState, setMissionState] = useState<MissionState>("esperando");
-  const [sequenceHold, setSequenceHold] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
   sendRef.current = send;
 
-  const motor = new URLSearchParams(window.location.search).get("motor") ?? "cesium";
+  const motor = new URLSearchParams(window.location.search).get("motor") ?? "tres";
 
   useEffect(() => {
     let frames = 0;
@@ -73,13 +72,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     const scene = escenaActual;
     scene.attachBuffer(buffer);
     scene.attachMissionState((state) => setMissionState(state));
-    // La escena congela la simulación mientras corre una secuencia (carga o
-    // recepción) para que el repartidor pueda alcanzar el dron y el HUD no
-    // muestre una altitud que no corresponde con lo que se ve.
-    scene.attachHold((hold) => {
-      setSequenceHold(hold);
-      sendRef.current(hold ? { type: "pause" } : { type: "resume" });
-    });
+
     sceneRef.current = scene;
     return () => {
       scene.destroy();
@@ -96,11 +89,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   }, [cameraMode]);
 
   const running = status.running;
-  const primaryLabel = sequenceHold
-    ? missionState === "animando_recepcion"
-      ? "Recibiendo paquete…"
-      : "Cargando paquete…"
-    : status.delivered
+  const primaryLabel = status.delivered
       ? "Entregado"
       : running
         ? "Pausar"
@@ -109,7 +98,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
           : "Iniciar vuelo";
 
   const handlePrimary = (): void => {
-    if (status.delivered || sequenceHold) return;
+    if (status.delivered) return;
     send({ type: running ? "pause" : "start" });
   };
 
@@ -186,7 +175,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
             type="button"
             className="button button-primary"
             onClick={handlePrimary}
-            disabled={status.delivered || sequenceHold}
+            disabled={status.delivered}
           >
             {primaryLabel}
           </button>
