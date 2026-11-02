@@ -99,13 +99,13 @@ export class DroneScene {
       shouldAnimate: true,
       useDefaultRenderLoop: false,
       showRenderLoopErrors: false,
-      msaaSamples: 4,
+      msaaSamples: 2,
       contextOptions: {
         webgl: { antialias: true, powerPreference: "high-performance" },
       },
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
     });
-    this.viewer.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
+    this.viewer.resolutionScale = Math.min(window.devicePixelRatio, 1.25);
     this.viewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
     this.viewer.scene.screenSpaceCameraController.minimumZoomDistance = 1.5;
     this.viewer.scene.screenSpaceCameraController.maximumZoomDistance = 2400;
@@ -129,6 +129,11 @@ export class DroneScene {
     scene.globe.dynamicAtmosphereLightingFromSun = true;
     scene.globe.showGroundAtmosphere = true;
     scene.globe.depthTestAgainstTerrain = true;
+    // Rendimiento del mapa: SSE 2 (por defecto) pide 4x más tiles de terreno y
+    // satelital. 6 mantiene nitidez de vuelo y baja el tráfico a ~1/3;
+    // caché mayor para no volver a pedir lo ya visto.
+    scene.globe.maximumScreenSpaceError = 6;
+    scene.globe.tileCacheSize = 300;
     scene.fog.enabled = true;
     scene.fog.density = 0.00012;
     scene.fog.minimumBrightness = 0.1;
@@ -138,8 +143,8 @@ export class DroneScene {
     scene.shadowMap.enabled = true;
     scene.shadowMap.softShadows = true;
     scene.shadowMap.darkness = 0.32;
-    scene.shadowMap.size = 2048;
-    scene.shadowMap.maximumDistance = 4500;
+    scene.shadowMap.size = 1024;
+    scene.shadowMap.maximumDistance = 2200;
 
     // Bloom: los materiales emisivos del dron y la polilínea brillante no
     // existen visualmente sin esta etapa.
@@ -200,6 +205,9 @@ export class DroneScene {
       (window as unknown as Record<string, unknown>).__setSun = (iso: string) => {
         this.viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(iso);
       };
+      // Diagnóstico en desarrollo: expone Cesium para regenerar la muestra de
+      // alturas de los edificios sin modificar el bundler.
+      (window as unknown as Record<string, unknown>).__Cesium = Cesium;
       // Diagnóstico en desarrollo: reconstruye el primitivo de edificios con el
       // terreno ya cargado. Sirve para detectar si se hornearon con alturas de
       // baja resolución.

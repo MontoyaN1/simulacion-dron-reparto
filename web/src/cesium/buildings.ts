@@ -1,6 +1,18 @@
 import * as Cesium from "cesium";
 import { geodeticToEnu, routeFrame, type Vec3 } from "@dron/shared";
+import rangeFootprintGrounds from "./ground-footprints.json";
 import type { WorldFrame } from "./world";
+
+/** Clave de la muestra: longitud y latitud del primer punto del anillo. */
+const groundKey = (lon: number, lat: number): string => `${lon.toFixed(7)}:${lat.toFixed(7)}`;
+
+const DATASET = rangeFootprintGrounds as Record<string, number>;
+
+const datasetGround = (lon: number, lat: number): number | null => {
+  const value = DATASET[groundKey(lon, lat)];
+  return typeof value === "number" ? value : null;
+};
+
 
 interface BuildingFeature {
   readonly properties?: {
@@ -47,40 +59,45 @@ export const loadBuildingPrimitive = async (
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const collection = (await response.json()) as { features?: BuildingFeature[] };
 
-    // Orden de impresora: primero se muestrea el terreno exacto de cada
-    // centroide. Si se usa `globe.getHeight` en el momento de construir, el
-    // tile cargado puede estar a baja resolución y el edificio nace decenas
-    // de metros bajo el terreno (con depthTest contra terreno, invisible).
-    let exactHeights: Cesium.Cartographic[] | null = null;
-    if (terrain) {
-      const lookups = (collection.features ?? [])
-        .filter((feature) => feature.geometry?.type === "Polygon" && feature.geometry.coordinates?.[0])
-        .map((feature) => Cesium.Cartographic.fromDegrees(
+    // Alturas exactas: primero el archivo versionado (instantáneo, sin red).
+    // Sólo las huellas que faltan se muestrean en vivo; ese es el paso que
+    // tardaba alrededor de un minuto al arrancar la simulación.
+    const pending = (collection.features ?? [])
+      .filter((feature) => feature.geometry?.type === "Polygon" && feature.geometry.coordinates?.[0])
+      .filter((feature) => {
+        const [lon, lat] = feature.geometry!.coordinates![0][0];
+        return datasetGround(lon, lat) === null;
+      })
+      .map((feature) =>
+        Cesium.Cartographic.fromDegrees(
           feature.geometry!.coordinates![0][0][0],
           feature.geometry!.coordinates![0][0][1],
-        ));
-      if (lookups.length > 0) {
-        try {
-          exactHeights = await Cesium.sampleTerrainMostDetailed(
-            terrain,
-            lookups.map((carto) => carto.clone() as Cesium.Cartographic),
-          );
-        } catch {
-          exactHeights = null;
+        ),
+      );
+    const sampled: (number | null)[] = [];
+    if (pending.length > 0 && terrain) {
+      try {
+        const obtained = await Cesium.sampleTerrainMostDetailed(
+          terrain,
+          pending.map((carto) => carto.clone() as Cesium.Cartographic),
+        );
+        for (const sample of obtained) {
+          sampled.push(sample && Number.isFinite(sample.height) ? sample.height : null);
         }
+      } catch {
+        sampled.length = 0;
       }
     }
     const byAnchor = new Map<string, number>();
-    if (exactHeights) {
-      const anchors = (collection.features ?? [])
-        .filter((feature) => feature.geometry?.type === "Polygon" && feature.geometry.coordinates?.[0])
-        .map((feature) => feature.geometry!.coordinates![0][0]);
-      anchors.forEach(([longitude, latitude], index) => {
-        const sample = exactHeights![index];
-        if (sample && Number.isFinite(sample.height)) {
-          byAnchor.set(`${longitude.toFixed(7)}:${latitude.toFixed(7)}`, sample.height);
-        }
-      });
+    let cursor = 0;
+    for (const anchor of pending) {
+      const value = sampled[cursor] ?? null;
+      cursor += 1;
+      const key = groundKey(
+        Cesium.Math.toDegrees(anchor.longitude),
+        Cesium.Math.toDegrees(anchor.latitude),
+      );
+      if (value !== null) byAnchor.set(key, value);
     }
 
     const instances: Cesium.GeometryInstance[] = [];
@@ -109,8 +126,10 @@ export const loadBuildingPrimitive = async (
       }
 
       const anchor = ring[0];
+      // Dataset versionado → muestreo en vivo (sólo lo que faltaba) → centro.
       const ground =
-        byAnchor.get(`${anchor[0].toFixed(7)}:${anchor[1].toFixed(7)}`) ??
+        datasetGround(anchor[0], anchor[1]) ??
+        byAnchor.get(groundKey(anchor[0], anchor[1])) ??
         world.heightAt(center);
       const height = buildingHeight(feature);
       const positions = ring.map(([longitude, latitude]) =>
@@ -143,10 +162,12 @@ export const loadBuildingPrimitive = async (
         translucent: false,
         closed: true,
       }),
-      asynchronous: true,
+      asynchronous: !import.meta.env.DEV,
       releaseGeometryInstances: true,
       allowPicking: false,
-      shadows: Cesium.ShadowMode.ENABLED,
+      // Sin proyección de sombra: 718 edificios como casters era el golpe
+      // principal de rendimiento. Siguen recibiendo la sombra del dron.
+      shadows: Cesium.ShadowMode.RECEIVE_ONLY,
     });
     viewer.scene.primitives.add(primitive);
     return primitive;
