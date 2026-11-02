@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Proxy de tiles con caché en disco.
@@ -26,7 +27,10 @@ const SERVICIOS = {
 
 type NombreServicio = keyof typeof SERVICIOS;
 
-const CACHE_ROOT = path.resolve(process.cwd(), "data/tiles");
+const CACHE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../data/tiles",
+);
 /** Tope del caché de tiles en el disco actual (2000 ficheros ~80 MB). */
 const TOPE_FICHEROS = 2000;
 

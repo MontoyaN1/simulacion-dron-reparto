@@ -21,3 +21,6 @@ data/*.sqlite
 web/public/cesium/
 
 data/tiles/
+
+data/tiles/
+server/data/tiles/
