@@ -214,19 +214,24 @@ q_escena = O + R_ENU · (x, y, z + H₀ + h_perfil(x, y))
 ```
 
 donde `O` es el origen geodésico de la UTS, `R_ENU` la rotación este-norte-arriba, `H₀ = 938,5 m`
-la cota de la UTS y `h_perfil` un perfil relativo muestreado cada ~100 m a lo largo de la ruta
-(Open-Elevation). Es una transformación afín que no cambia distancias horizontales, rumbos ni la
-norma académica: solo desplaza verticalmente la representación. Así el dron aterriza sobre la
-cota real de la UIS aunque el modelo siga usando `z = 0` como suelo local.
+la cota de la UTS y `h_perfil` una malla 2D relativa (distancia a lo largo de la ruta ×
+desplazamiento lateral, ±400 m) muestreada con Open-Elevation e interpolada bilinealmente. Es
+una transformación afín que no cambia distancias horizontales, rumbos ni la norma académica:
+solo desplaza verticalmente la representación. Así el dron aterriza sobre la cota real de la
+UIS aunque el modelo siga usando `z = 0` como suelo local.
 
-La cámara se reconstruye con `setView` a partir de la posición interpolada y un desplazamiento
-fijo por modo (persecución, órbita, cenital); la orientación se obtiene proyectando la dirección
-al objetivo en el marco ENU de la cámara:
+La cámara vive en un `CameraRig`: sigue un objetivo suavizado exponencialmente con el `dt` real,
+fija su posición clásica por modo (persecución, órbita, cenital) y anima los cambios de modo con
+una transición `smoothstep` entre cámara previa y nueva. La orientación se obtiene proyectando
+la dirección al objetivo en el marco ENU de la cámara:
 
 ```
 heading = atan2(d_este, d_norte),   pitch = asin(d_arriba)
 ```
 
 Esto elimina la realimentación de `lookAt` que producía el temblor vertical por fotograma.
+El movimiento interpolado (60 fps) vive en `TelemetryBuffer`, con una latencia de render de
+~110 ms sobre la red a 15 Hz; el dron es un glTF animado, no geometría por fotograma.
 Trazabilidad: `web/src/cesium/world.ts`, `web/src/cesium/scene.ts`,
-`web/src/cesium/drone.ts` y `web/src/cesium/terrain-grid.ts`.
+`web/src/cesium/camera-rig.ts`, `web/src/cesium/drone.ts`, `web/src/cesium/buildings.ts`
+y `web/src/cesium/terrain-grid.ts`.

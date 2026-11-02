@@ -5,6 +5,9 @@ interface TimedSample {
   readonly receivedAt: number;
 }
 
+const RENDER_DELAY_MS = 110;
+const MAX_SAMPLES = 16;
+
 const lerp = (a: number, b: number, alpha: number): number => a + (b - a) * alpha;
 
 const lerpAngle = (a: number, b: number, alpha: number): number => {
@@ -43,27 +46,48 @@ const interpolate = (a: Telemetry, b: Telemetry, alpha: number): Telemetry => ({
 });
 
 export class TelemetryBuffer {
-  private previous: TimedSample | null = null;
-  private current: TimedSample | null = null;
+  private samples: TimedSample[] = [];
 
   push(telemetry: Telemetry): void {
-    this.previous = this.current;
-    this.current = { telemetry, receivedAt: performance.now() };
+    const latest = this.samples[this.samples.length - 1]?.telemetry;
+    if (
+      latest &&
+      (telemetry.t < latest.t - 0.25 ||
+        Math.hypot(
+          telemetry.position[0] - latest.position[0],
+          telemetry.position[1] - latest.position[1],
+          telemetry.position[2] - latest.position[2],
+        ) > 250)
+    ) {
+      this.samples = [];
+    }
+
+    this.samples.push({ telemetry, receivedAt: performance.now() });
+    if (this.samples.length > MAX_SAMPLES) this.samples.shift();
   }
 
   get latest(): Telemetry | null {
-    return this.current?.telemetry ?? null;
+    return this.samples[this.samples.length - 1]?.telemetry ?? null;
   }
 
   sample(now = performance.now()): Telemetry | null {
-    if (!this.current) return null;
-    if (!this.previous) return this.current.telemetry;
+    if (this.samples.length === 0) return null;
+    const renderAt = now - RENDER_DELAY_MS;
+    const first = this.samples[0];
+    if (renderAt <= first.receivedAt || this.samples.length === 1) {
+      return first.telemetry;
+    }
 
-    const span = this.current.receivedAt - this.previous.receivedAt;
-    if (span <= 0) return this.current.telemetry;
+    for (let index = 0; index < this.samples.length - 1; index += 1) {
+      const previous = this.samples[index];
+      const current = this.samples[index + 1];
+      if (renderAt > current.receivedAt) continue;
+      const span = current.receivedAt - previous.receivedAt;
+      if (span <= 0) return current.telemetry;
+      const alpha = Math.min(1, Math.max(0, (renderAt - previous.receivedAt) / span));
+      return interpolate(previous.telemetry, current.telemetry, alpha);
+    }
 
-    const alpha = Math.min(1, Math.max(0, (now - this.previous.receivedAt) / span));
-    if (alpha >= 1) return this.current.telemetry;
-    return interpolate(this.previous.telemetry, this.current.telemetry, alpha);
+    return this.latest;
   }
 }

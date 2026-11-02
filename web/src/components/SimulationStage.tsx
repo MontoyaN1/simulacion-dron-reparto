@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ClientCommand, SimulationStatus, Telemetry, Vec3 } from "@dron/shared";
 import { CAMERA_MODES, type CameraMode } from "../cesium/constants";
 import { DroneScene } from "../cesium/scene";
+import { MISSION_STATE_LABEL, type MissionState } from "../cesium/mission";
 import type { TelemetryBuffer } from "../sim/buffer";
 import { PHASE_LABELS, fmt, fmtClock, fmtInt } from "../format";
 
@@ -19,13 +20,25 @@ const SPEEDS = [1, 2, 4] as const;
 export function SimulationStage({ buffer, route, telemetry, status, connected, send }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<DroneScene | null>(null);
+  const sendRef = useRef(send);
   const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
+  const [missionState, setMissionState] = useState<MissionState>("esperando");
+  const [sequenceHold, setSequenceHold] = useState(false);
+  sendRef.current = send;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const scene = new DroneScene(host);
     scene.attachBuffer(buffer);
+    scene.attachMissionState((state) => setMissionState(state));
+    // La escena congela la simulación mientras corre una secuencia (carga o
+    // recepción) para que el repartidor pueda alcanzar el dron y el HUD no
+    // muestre una altitud que no corresponde con lo que se ve.
+    scene.attachHold((hold) => {
+      setSequenceHold(hold);
+      sendRef.current(hold ? { type: "pause" } : { type: "resume" });
+    });
     sceneRef.current = scene;
     return () => {
       scene.destroy();
@@ -42,16 +55,20 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   }, [cameraMode]);
 
   const running = status.running;
-  const primaryLabel = status.delivered
-    ? "Entregado"
-    : running
-      ? "Pausar"
-      : status.started
-        ? "Reanudar"
-        : "Iniciar vuelo";
+  const primaryLabel = sequenceHold
+    ? missionState === "animando_recepcion"
+      ? "Recibiendo paquete…"
+      : "Cargando paquete…"
+    : status.delivered
+      ? "Entregado"
+      : running
+        ? "Pausar"
+        : status.started
+          ? "Reanudar"
+          : "Iniciar vuelo";
 
   const handlePrimary = (): void => {
-    if (status.delivered) return;
+    if (status.delivered || sequenceHold) return;
     send({ type: running ? "pause" : "start" });
   };
 
@@ -61,6 +78,11 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   return (
     <section className="stage" aria-label="Escena 3D de la simulación">
       <div className="stage-host" ref={hostRef} />
+
+      <div className="mission-chip" role="status">
+        <span className={`mission-dot mission-${missionState}`} />
+        <span className="mission-label">{MISSION_STATE_LABEL[missionState]}</span>
+      </div>
 
       <div className="stage-top">
         <div className="stage-heading">
@@ -118,7 +140,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
             type="button"
             className="button button-primary"
             onClick={handlePrimary}
-            disabled={status.delivered}
+            disabled={status.delivered || sequenceHold}
           >
             {primaryLabel}
           </button>

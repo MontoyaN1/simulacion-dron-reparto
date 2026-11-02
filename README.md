@@ -7,10 +7,11 @@ documento de la propuesta.
 
 **Estado actual: fase 4 completada.** El repositorio trae el monorepo, el marco de coordenadas
 reales UTS-UIS, la librería de álgebra lineal con pruebas, un motor de simulación determinista,
-telemetría en vivo por WebSocket, una escena 3D con CesiumJS (ciudad fotogramétrica de Google,
-dron detallado, estela y cuatro cámaras), la ciudad con edificios de OpenStreetMap extruidos y
-ruta planificada con A* sobre una rejilla de 10 m, y el panel de álgebra en vivo: los 11 temas
-del documento con sus valores calculados en cada muestra y una tabla de datos a 1 Hz.
+telemetría en vivo por WebSocket, una escena 3D con CesiumJS (terreno real 3D, edificios OSM
+extruidos, dron glTF animado, estela y cuatro cámaras con transiciones suaves), la ciudad con
+edificios de OpenStreetMap a partir de huellas y alturas reales, y ruta planificada con A*
+sobre una rejilla de 10 m, y el panel de álgebra en vivo: los 11 temas del documento con sus
+valores calculados en cada muestra y una tabla de datos a 1 Hz.
 
 ## Stack
 
@@ -56,18 +57,21 @@ de la API se puede cambiar con `PORT=otro npm run dev`. Los assets de Cesium (`W
 
 La primera conexión abre el vuelo automáticamente. En la escena se puede pausar/reanudar,
 reiniciar, cambiar la velocidad (1×, 2×, 4×) y alternar entre las cámaras Persecución, Órbita,
-Cenital y Libre. La ciudad se carga en vivo: primero se intenta Google Photorealistic 3D Tiles
-(a través del token público de Cesium ion), luego OSM Buildings y, si no hay red, se usan las
-extrusiones locales de `data/buildings.geojson`.
+Cenital y Libre. La ciudad se carga con **Cesium World Terrain** (3D real, token público de
+Cesium ion) sobre imagen satelital de Esri; los edificios se añaden como extrusiones opacas a
+partir de las huellas y alturas reales de OSM (`data/buildings.geojson`). Si el terreno de ion
+no está disponible, la escena cae a un plano local `z = 0` con las mismas huellas.
 
 El marco ENU se ancla a la cota real de la UTS (`CITY_GROUND_HEIGHT = 938,5 m`). Para que el
-dron no quede enterrado cuando el terreno sube hacia la UIS, la escena suma un perfil de
-elevación relativo muestreado cada ~100 m con Open-Elevation (`web/src/cesium/terrain-grid.ts`).
-La telemetría y el modelo académico siguen en un plano ENU con `z = 0` en el suelo; solo la
-visualización aplica ese perfil. La cámara usa `camera.setView` con la telemetría interpolada y
-desplazamientos fijos por modo, en lugar de `camera.lookAt` por fotograma, para eliminar el
-temblor; el dron incluye cuerpo, brazos, rotores con aspas y disco de giro, tren de aterrizaje,
-gimbal, paquete, antena, luces y una oscilación de hover de pocos centímetros.
+dron no quede enterrado cuando el terreno sube hacia la UIS, la escena suma una malla de
+elevación relativa muestreada con Open-Elevation (`web/src/cesium/terrain-grid.ts`). La
+telemetría y el modelo académico siguen en un plano ENU con `z = 0` en el suelo; solo la
+visualización aplica esa malla. El dron es un modelo **glTF procedural** propio
+(`scripts/build-drone-model.mjs` → `web/public/models/dron-reparto.glb`) con rotores
+animados, tren de aterrizaje, gimbal, paquete y luces navegacionales; la telemetría se
+interpola a fotograma en `TelemetryBuffer` y la cámara usa un rig con transiciones suaves y
+desplazamientos fijos por modo (`web/src/cesium/camera-rig.ts`). En crucero la altitud oscila
+suavemente (±5 m) para que el vuelo muestre subidas y bajadas reales.
 
 Endpoints disponibles:
 
@@ -110,9 +114,9 @@ Las coordenadas de los campus provienen de OpenStreetMap (© colaboradores de Op
 ODbL 1.0) y se verificaron con Nominatim. Las huellas de los edificios se descargan una sola vez
 con `npm run fetch:buildings` desde Overpass, se recortan a 450 m de la recta UTS-UIS y se
 versionan en `data/buildings.geojson` (718 edificios); así el motor y la escena funcionan sin
-volver a consultar Overpass. Las teselas de Google Photorealistic 3D Tiles se usan mediante el
-token público de Cesium ion y se atribuyen en la esquina de la escena; la imagen base de
-respaldo es Esri World Imagery y el perfil de elevación se generó con Open-Elevation.
+volver a consultar Overpass. El terreno 3D usa Cesium World Terrain mediante el token público
+de Cesium ion y se atribuye en la esquina de la escena; la imagen base es Esri World Imagery y
+el perfil de elevación se generó con Open-Elevation.
 
 ## Contexto académico
 

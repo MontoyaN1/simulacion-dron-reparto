@@ -1,74 +1,81 @@
 import * as Cesium from "cesium";
 import type { Telemetry, Vec3 } from "@dron/shared";
-import { COLORS } from "./constants";
+import { COLORS, DRONE_MODEL_SCALE, GEAR_CLEARANCE, PACKAGE_SIZE } from "./constants";
 import type { WorldFrame } from "./world";
 
-const ARM_LENGTH = 0.46;
-const ROTOR_HEIGHT = 0.12;
-const BLADE_LENGTH = 0.24;
-const GEAR_CLEARANCE = 0.34;
 const TRAIL_MIN_DISTANCE = 2.5;
 const TRAIL_MAX_POINTS = 1500;
+const ROTOR_BASE_RPS = 4.5;
+const ROTOR_SPEED_GAIN = 1.4;
+const ROTOR_MAX_RPS = 14;
 
 const color = (css: string, alpha = 1): Cesium.Color =>
   Cesium.Color.fromCssColorString(css).withAlpha(alpha);
-
-interface DroneState {
-  position: Vec3;
-  headingDeg: number;
-  velocity: Vec3;
-  acceleration: Vec3;
-  t: number;
-  rotorPhase: number;
-}
 
 export class DroneModel {
   private readonly entities: Cesium.Entity[] = [];
   private readonly trailPositions: Cesium.Cartesian3[] = [];
   private readonly trailEntity: Cesium.Entity;
-  private readonly state: DroneState = {
-    position: [0, 0, 0],
-    headingDeg: 0,
-    velocity: [0, 0, 0],
-    acceleration: [0, 0, 0],
-    t: 0,
-    rotorPhase: 0,
-  };
+  private readonly fallback: Cesium.Entity;
   private center = new Cesium.Cartesian3();
   private ground = new Cesium.Cartesian3();
   private rotation = Cesium.Matrix3.clone(Cesium.Matrix3.IDENTITY);
-  private orientation = new Cesium.Quaternion(0, 0, 0, 1);
+  private modelMatrix = Cesium.Matrix4.clone(Cesium.Matrix4.IDENTITY);
+  private model: Cesium.Model | null = null;
+  private fallbackShadow: Cesium.Entity | null = null;
   private lastTrailPoint: Cesium.Cartesian3 | null = null;
   private lastFrameTime = performance.now();
   private pitch = 0;
   private roll = 0;
+  private rotorPhase = 0;
+  private display: Vec3 = [0, 0, GEAR_CLEARANCE];
   private destroyed = false;
 
   constructor(
     private readonly viewer: Cesium.Viewer,
     private readonly world: WorldFrame,
   ) {
-    this.center = this.world.enu(this.state.position);
-    this.ground = this.world.ground(this.state.position);
+    this.center = this.world.enu([0, 0, GEAR_CLEARANCE]);
+    this.ground = this.world.ground([0, 0, 0]);
 
     this.trailEntity = this.add({
       polyline: {
         positions: new Cesium.CallbackProperty(() => this.trailPositions, false),
-        width: 3,
+        width: 2.4,
         material: new Cesium.PolylineGlowMaterialProperty({
-          glowPower: 0.28,
-          color: color(COLORS.accent, 0.9),
+          glowPower: 0.2,
+          color: color(COLORS.accent, 0.72),
         }),
         arcType: Cesium.ArcType.NONE,
       },
     });
 
-    this.buildFrame();
-    this.buildRotors();
-    this.buildCamera();
-    this.buildPackage();
-    this.buildLights();
-    this.buildShadowAndTether();
+    this.fallback = this.add({
+      position: new Cesium.CallbackPositionProperty(() => this.center, false),
+      ellipsoid: {
+        radii: new Cesium.Cartesian3(0.58, 0.58, 0.18),
+        material: color(COLORS.body),
+        outline: true,
+        outlineColor: color(COLORS.accent, 0.8),
+      },
+    });
+
+    this.fallbackShadow = this.add({
+      ellipse: {
+        semiMajorAxis: 0.9,
+        semiMinorAxis: 0.9,
+        material: color("#000000", 0.2),
+        height: new Cesium.CallbackProperty(
+          () => (Cesium.Cartographic.fromCartesian(this.ground)?.height ?? 0) + 0.15,
+          false,
+        ),
+      },
+      position: new Cesium.CallbackPositionProperty(() => this.ground, false),
+    });
+    // Se activa solo si el GLB no carga: sin sombras reales, el respaldo
+    // quedaría suspendido en el aire.
+    this.fallbackShadow.show = false;
+    void this.loadModel();
   }
 
   private add(options: Cesium.Entity.ConstructorOptions): Cesium.Entity {
@@ -77,369 +84,99 @@ export class DroneModel {
     return entity;
   }
 
-  private localPoint(x: number, y: number, z: number): Cesium.Cartesian3 {
-    const offset = Cesium.Matrix3.multiplyByVector(
-      this.rotation,
-      new Cesium.Cartesian3(x, y, z),
-      new Cesium.Cartesian3(),
-    );
-    return Cesium.Cartesian3.add(this.center, offset, new Cesium.Cartesian3());
-  }
-
-  private orientationProperty(): Cesium.CallbackProperty {
-    return new Cesium.CallbackProperty(() => this.orientation, false);
-  }
-
-  private positionProperty(x: number, y: number, z: number): Cesium.CallbackPositionProperty {
-    return new Cesium.CallbackPositionProperty(() => this.localPoint(x, y, z), false);
-  }
-
-  private box(
-    x: number,
-    y: number,
-    z: number,
-    dimensions: Cesium.Cartesian3,
-    material: Cesium.Color,
-    outline?: Cesium.Color,
-  ): void {
-    this.add({
-      position: this.positionProperty(x, y, z),
-      orientation: this.orientationProperty(),
-      box: {
-        dimensions,
-        material,
-        outline: Boolean(outline),
-        outlineColor: outline ?? material,
-        outlineWidth: 1,
-      },
-    });
-  }
-
-  private buildFrame(): void {
-    this.box(
-      0,
-      0,
-      0,
-      new Cesium.Cartesian3(0.64, 0.44, 0.14),
-      color(COLORS.body),
-      color(COLORS.metal, 0.45),
-    );
-    this.box(
-      0,
-      -0.01,
-      0.085,
-      new Cesium.Cartesian3(0.46, 0.32, 0.055),
-      color("#1e293b"),
-      color("#0f172a", 0.8),
-    );
-    this.box(
-      0,
-      0.21,
-      0.055,
-      new Cesium.Cartesian3(0.16, 0.08, 0.05),
-      color(COLORS.accent, 0.85),
-      color("#0ea5e9"),
-    );
-    this.box(
-      0,
-      -0.02,
-      0.135,
-      new Cesium.Cartesian3(0.3, 0.22, 0.06),
-      color("#334155"),
-      color("#0f172a"),
-    );
-    this.box(
-      0,
-      -0.02,
-      0.168,
-      new Cesium.Cartesian3(0.32, 0.035, 0.062),
-      color(COLORS.package, 0.95),
-    );
-
-    for (let index = 0; index < 4; index += 1) {
-      const angle = Math.PI / 4 + (index * Math.PI) / 2;
-      const dx = Math.sin(angle);
-      const dy = Math.cos(angle);
-      this.add({
-        polyline: {
-          positions: new Cesium.CallbackProperty(
-            () => [
-              this.localPoint(dx * 0.16, dy * 0.14, 0.0),
-              this.localPoint(dx * ARM_LENGTH, dy * ARM_LENGTH, 0.015),
-            ],
-            false,
-          ),
-          width: 5,
-          material: color(COLORS.metal, 0.9),
-          arcType: Cesium.ArcType.NONE,
-        },
+  private async loadModel(): Promise<void> {
+    try {
+      const model = await Cesium.Model.fromGltfAsync({
+        url: "/models/dron-reparto.glb",
+        modelMatrix: this.modelMatrix,
+        scale: DRONE_MODEL_SCALE,
+        upAxis: Cesium.Axis.Z,
+        forwardAxis: Cesium.Axis.Y,
+        clampAnimations: false,
+        shadows: Cesium.ShadowMode.ENABLED,
+        enableShowOutline: false,
+        backFaceCulling: true,
       });
-      this.add({
-        polyline: {
-          positions: new Cesium.CallbackProperty(
-            () => [
-              this.localPoint(dx * 0.18, dy * 0.17, -0.075),
-              this.localPoint(dx * 0.28, dy * 0.26, -0.29),
-            ],
-            false,
-          ),
-          width: 2.5,
-          material: color("#64748b", 0.9),
-          arcType: Cesium.ArcType.NONE,
-        },
-      });
-    }
-
-    for (const side of [-1, 1]) {
-      this.add({
-        polyline: {
-          positions: new Cesium.CallbackProperty(
-            () => [
-              this.localPoint(side * 0.27, -0.3, -0.3),
-              this.localPoint(side * 0.27, 0.3, -0.3),
-            ],
-            false,
-          ),
-          width: 3.5,
-          material: color("#1f2937"),
-          arcType: Cesium.ArcType.NONE,
-        },
-      });
-    }
-
-    this.add({
-      polyline: {
-        positions: new Cesium.CallbackProperty(
-          () => [
-            this.localPoint(0.1, -0.2, 0.06),
-            this.localPoint(0.16, -0.34, 0.3),
-          ],
-          false,
-        ),
-        width: 1.6,
-        material: color("#94a3b8"),
-        arcType: Cesium.ArcType.NONE,
-      },
-    });
-  }
-
-  private buildRotors(): void {
-    for (let index = 0; index < 4; index += 1) {
-      const angle = Math.PI / 4 + (index * Math.PI) / 2;
-      const x = Math.sin(angle) * ARM_LENGTH;
-      const y = Math.cos(angle) * ARM_LENGTH;
-
-      this.add({
-        position: this.positionProperty(x, y, ROTOR_HEIGHT - 0.05),
-        orientation: this.orientationProperty(),
-        cylinder: {
-          length: 0.1,
-          topRadius: 0.05,
-          bottomRadius: 0.062,
-          material: color("#475569"),
-          outline: true,
-          outlineColor: color("#0f172a", 0.8),
-        },
-      });
-
-      this.add({
-        position: this.positionProperty(x, y, ROTOR_HEIGHT + 0.008),
-        orientation: this.orientationProperty(),
-        cylinder: {
-          length: 0.02,
-          topRadius: 0.03,
-          bottomRadius: 0.03,
-          material: color("#cbd5e1"),
-        },
-      });
-
-      this.add({
-        position: this.positionProperty(x, y, ROTOR_HEIGHT + 0.024),
-        orientation: this.orientationProperty(),
-        cylinder: {
-          length: 0.006,
-          topRadius: BLADE_LENGTH,
-          bottomRadius: BLADE_LENGTH,
-          material: color("#e0f2fe", 0.18),
-        },
-      });
-
-      for (let blade = 0; blade < 2; blade += 1) {
-        const offset = blade * (Math.PI / 2);
-        this.add({
-          polyline: {
-            positions: new Cesium.CallbackProperty(() => {
-              const bladeAngle = this.state.rotorPhase + offset + index * 0.6;
-              const dx = Math.cos(bladeAngle) * BLADE_LENGTH;
-              const dy = Math.sin(bladeAngle) * BLADE_LENGTH;
-              return [
-                this.localPoint(x - dx, y - dy, ROTOR_HEIGHT + 0.03),
-                this.localPoint(x + dx, y + dy, ROTOR_HEIGHT + 0.03),
-              ];
-            }, false),
-            width: 2,
-            material: color("#bae6fd", 0.32),
-            arcType: Cesium.ArcType.NONE,
-          },
-        });
+      if (this.destroyed) {
+        model.destroy();
+        return;
       }
+      this.model = model;
+      this.model.modelMatrix = this.modelMatrix;
+      this.viewer.scene.primitives.add(model);
+      const start = (): void => {
+        if (this.destroyed) return;
+        model.activeAnimations.addAll({
+          loop: Cesium.ModelAnimationLoop.REPEAT,
+          animationTime: (duration) => this.rotorPhase % duration,
+        });
+        this.fallback.show = false;
+      };
+      if (model.ready) start();
+      else model.readyEvent.addEventListener(start);
+    } catch (error) {
+      if (this.fallbackShadow) this.fallbackShadow.show = true;
+      console.warn(
+        "No se pudo cargar el modelo GLB del dron; se usa el respaldo",
+        error instanceof Error ? `${error.name}: ${error.message}\n${error.stack}` : String(error),
+      );
     }
   }
 
-  private buildCamera(): void {
-    this.add({
-      position: this.positionProperty(0, 0.22, -0.11),
-      ellipsoid: {
-        radii: new Cesium.Cartesian3(0.075, 0.075, 0.07),
-        material: color("#1f2937"),
-        outline: true,
-        outlineColor: color("#64748b", 0.8),
-      },
-    });
-    this.add({
-      position: this.positionProperty(0, 0.29, -0.11),
-      ellipsoid: {
-        radii: new Cesium.Cartesian3(0.038, 0.03, 0.038),
-        material: color("#020617"),
-      },
-    });
-    this.add({
-      position: this.positionProperty(0, 0.32, -0.11),
-      point: {
-        pixelSize: 4,
-        color: color("#38bdf8", 0.9),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    });
-  }
 
-  private buildPackage(): void {
-    this.box(
-      0,
-      -0.02,
-      -0.21,
-      new Cesium.Cartesian3(0.28, 0.22, 0.16),
-      color(COLORS.package),
-      color("#7c2d12", 0.9),
-    );
-    this.box(
-      0,
-      -0.02,
-      -0.21,
-      new Cesium.Cartesian3(0.3, 0.028, 0.17),
-      color("#78350f", 0.95),
-    );
-    this.box(
-      0,
-      -0.02,
-      -0.21,
-      new Cesium.Cartesian3(0.028, 0.24, 0.17),
-      color("#78350f", 0.95),
-    );
-  }
-
-  private buildLights(): void {
-    const lights: Array<{ x: number; y: number; color: string }> = [
-      { x: 0.33, y: 0.0, color: COLORS.green },
-      { x: -0.33, y: 0.0, color: COLORS.red },
-    ];
-    for (const light of lights) {
-      this.add({
-        position: this.positionProperty(light.x, light.y, 0.02),
-        point: {
-          pixelSize: 5,
-          color: color(light.color),
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
-      });
-    }
-    this.add({
-      position: this.positionProperty(0, -0.26, 0.12),
-      point: {
-        pixelSize: 6,
-        color: Cesium.Color.WHITE,
-        show: new Cesium.CallbackProperty(
-          () => this.state.t % 1.1 < 0.08,
-          false,
-        ),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    });
-  }
-
-  private buildShadowAndTether(): void {
-    this.add({
-      ellipse: {
-        semiMajorAxis: 1.0,
-        semiMinorAxis: 1.0,
-        material: color("#000000", 0.26),
-        height: new Cesium.CallbackProperty(
-          () =>
-            (Cesium.Cartographic.fromCartesian(this.ground)?.height ?? 0) + 0.15,
-          false,
-        ),
-      },
-      position: new Cesium.CallbackPositionProperty(() => this.ground, false),
-    });
-
-    this.add({
-      polyline: {
-        positions: new Cesium.CallbackProperty(
-          () => [this.center, this.ground],
-          false,
-        ),
-        width: 1.2,
-        material: new Cesium.PolylineDashMaterialProperty({
-          color: color(COLORS.accent, 0.28),
-          dashLength: 12,
-        }),
-        arcType: Cesium.ArcType.NONE,
-      },
-    });
-  }
-
-  update(sample: Telemetry): void {
+  update(sample: Telemetry, hoverZ?: number | null): void {
     if (this.destroyed) return;
     const now = performance.now();
     const deltaSeconds = Math.min(0.1, Math.max(0.001, (now - this.lastFrameTime) / 1000));
     this.lastFrameTime = now;
 
-    this.state.position = [sample.position[0], sample.position[1], sample.position[2]];
-    this.state.headingDeg = sample.headingDeg;
-    this.state.velocity = [sample.velocity[0], sample.velocity[1], sample.velocity[2]];
-    this.state.acceleration = [
-      sample.acceleration[0],
-      sample.acceleration[1],
-      sample.acceleration[2],
-    ];
-    this.state.t = sample.t;
-
-    const display: Vec3 = [
-      this.state.position[0],
-      this.state.position[1],
-      this.state.position[2] + GEAR_CLEARANCE,
-    ];
+    // `world.enu` ya añade la elevación real del terreno, así que aquí solo
+    // hace falta el offset de la geometría del modelo sobre el suelo.
+    const minimumZ = GEAR_CLEARANCE;
+    const engineZ = sample.position[2] + GEAR_CLEARANCE;
+    const hoverOverride = hoverZ ?? null;
+    const displayZ =
+      hoverOverride !== null && hoverOverride > engineZ
+        ? Math.max(hoverOverride, minimumZ)
+        : Math.max(engineZ, minimumZ);
+    const display: Vec3 = [sample.position[0], sample.position[1], displayZ];
+    this.display = display;
     this.center = this.world.enu(display);
     this.ground = this.world.ground(display);
 
-    const speed = Math.hypot(this.state.velocity[0], this.state.velocity[1]);
-    const heading = Cesium.Math.toRadians(this.state.headingDeg);
-    const rightX = Math.cos(heading);
-    const rightY = -Math.sin(heading);
-    const lateralAcceleration =
-      this.state.acceleration[0] * rightX + this.state.acceleration[1] * rightY;
+    // Los rotores giran con tiempo real: siguen girando aunque la simulación
+    // esté pausada, como un dron realmente en hover.
+    const rotorRate = Math.min(
+      ROTOR_MAX_RPS,
+      ROTOR_BASE_RPS + sample.speed * ROTOR_SPEED_GAIN,
+    );
+    this.rotorPhase += deltaSeconds * rotorRate;
 
-    const targetPitch = -Math.min(0.17, speed * 0.0085);
-    const targetRoll = Cesium.Math.clamp(lateralAcceleration * 0.03, -0.24, 0.24);
-    const blend = 1 - Math.exp(-deltaSeconds * 7);
+    const speed = Math.hypot(sample.velocity[0], sample.velocity[1]);
+    const heading = Cesium.Math.toRadians(sample.headingDeg);
+    const lateralAcceleration =
+      sample.acceleration[0] * Math.cos(heading) -
+      sample.acceleration[1] * Math.sin(heading);
+    const targetPitch = -Math.min(0.2, speed * 0.009);
+    // Un cuadricóptero real inclina 15-25° al girar; el valor anterior (0.2 rad
+    // máx) nunca se alcanzaba porque la aceleración lateral está limitada a
+    // 2.5 m/s². Con ganancia 0.12 el banco llega a ~17°.
+    const targetRoll = Cesium.Math.clamp(lateralAcceleration * 0.12, -0.32, 0.32);
+    const blend = 1 - Math.exp(-deltaSeconds * 6);
     this.pitch += (targetPitch - this.pitch) * blend;
     this.roll += (targetRoll - this.roll) * blend;
 
-    this.orientation = Cesium.Transforms.headingPitchRollQuaternion(
+    const orientation = Cesium.Transforms.headingPitchRollQuaternion(
       this.center,
       new Cesium.HeadingPitchRoll(heading, this.pitch, this.roll),
     );
-    this.rotation = Cesium.Matrix3.fromQuaternion(this.orientation, new Cesium.Matrix3());
+    this.rotation = Cesium.Matrix3.fromQuaternion(orientation, this.rotation);
+    this.modelMatrix = Cesium.Matrix4.fromRotationTranslation(
+      this.rotation,
+      this.center,
+      this.modelMatrix,
+    );
+    if (this.model) this.model.modelMatrix = this.modelMatrix;
 
     if (
       !this.lastTrailPoint ||
@@ -453,14 +190,27 @@ export class DroneModel {
       }
       this.lastTrailPoint = Cesium.Cartesian3.clone(this.center);
       this.trailPositions.push(Cesium.Cartesian3.clone(this.center));
-      if (this.trailPositions.length > TRAIL_MAX_POINTS) {
-        this.trailPositions.shift();
-      }
+      if (this.trailPositions.length > TRAIL_MAX_POINTS) this.trailPositions.shift();
     }
   }
 
   get trail(): Cesium.Entity {
     return this.trailEntity;
+  }
+
+  /** Posición visual del centro del dron en ENU (incluye clamp y hover). */
+  get displayPosition(): Vec3 {
+    return this.display;
+  }
+
+  /**
+   * Centro del paquete cuando va enganchado: cara inferior del fuselaje
+   * (z = -0.205 unidades de modelo) menos media altura de la caja, para que
+   * quede colgando y no atravesando el chasis.
+   */
+  bellyPoint(): Vec3 {
+    const [x, y, z] = this.display;
+    return [x, y, z - 0.205 * DRONE_MODEL_SCALE - PACKAGE_SIZE[2] / 2];
   }
 
   clearTrail(): void {
@@ -471,9 +221,11 @@ export class DroneModel {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    for (const entity of this.entities) {
-      this.viewer.entities.remove(entity);
+    if (this.model) {
+      this.viewer.scene.primitives.remove(this.model);
+      this.model = null;
     }
+    for (const entity of this.entities) this.viewer.entities.remove(entity);
     this.entities.length = 0;
     this.trailPositions.length = 0;
   }
