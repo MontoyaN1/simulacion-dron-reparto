@@ -50,6 +50,8 @@ export class EscenaTres {
   private buffer: EscenaBuffer | null = null;
   private onEstado: ((estado: MissionState) => void) | null = null;
   private modo: CameraMode = "chase";
+  /** Distancia de cámara al dron (m), controlada por la rueda. */
+  private dist = 8.6;
   private destruida = false;
   private lastFrame = performance.now();
   private rumboActual = 0;
@@ -78,6 +80,15 @@ export class EscenaTres {
     );
     this.camara.position.set(0, 220, -420);
     this.camara.lookAt(0, 0, 0);
+    this.dist = 8.6;
+
+    // Zoom con rueda dentro del visor: preventDefault + passive:false para que
+    // la página no haga scroll (era el choque reportado). Limitado 3\u201360 m.
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener("wheel", (evento) => {
+      evento.preventDefault();
+      this.dist = Math.max(3, Math.min(60, this.dist * Math.exp(evento.deltaY * 0.001)));
+    }, { passive: false });
     this.mundo.background = new THREE.Color("#8fb4d8");
     this.mundo.fog = new THREE.Fog(new THREE.Color("#a9c4dd"), 1600, 4600);
 
@@ -294,9 +305,9 @@ export class EscenaTres {
     if (this.modo === "chase") {
       const lateral = 0.65 * Math.cos(this.rumboActual);
       const suave = new THREE.Vector3(
-        objetivo.x - Math.sin(this.rumboActual) * 8.6 + lateral,
-        objetivo.y + 2.35,
-        objetivo.z - Math.cos(this.rumboActual) * 8.6 - 0.65 * Math.sin(this.rumboActual),
+        objetivo.x - Math.sin(this.rumboActual) * this.dist + lateral,
+        objetivo.y + 2.35 * (this.dist / 8.6),
+        objetivo.z - Math.cos(this.rumboActual) * this.dist - 0.65 * Math.sin(this.rumboActual),
       );
       this.camara.position.lerp(suave, 1 - Math.exp(-dt * 6));
       this.camara.lookAt(objetivo);
@@ -305,16 +316,16 @@ export class EscenaTres {
     if (this.modo === "orbit") {
       this.orbita += dt * 0.12;
       const deorb = new THREE.Vector3(
-        objetivo.x + Math.cos(this.orbita) * 12.5,
-        objetivo.y + 5.8,
-        objetivo.z + Math.sin(this.orbita) * 12.5,
+        objetivo.x + Math.cos(this.orbita) * this.dist,
+        objetivo.y + 5.8 * (this.dist / 12.5) + 2,
+        objetivo.z + Math.sin(this.orbita) * this.dist,
       );
       this.camara.position.lerp(deorb, 0.25);
       this.camara.lookAt(objetivo);
       return;
     }
     if (this.modo === "top") {
-      const visto = new THREE.Vector3(objetivo.x, objetivo.y + 85, objetivo.z - 0.01);
+      const visto = new THREE.Vector3(objetivo.x, objetivo.y + this.dist * 10, objetivo.z - 0.01);
       this.camara.position.lerp(visto, 0.08);
       this.camara.lookAt(objetivo);
       return;
