@@ -68,8 +68,10 @@ if (existsSync(webDist)) {
     setHeaders: (res, ruta) => {
       if (ruta.endsWith(".html")) {
         res.setHeader("Cache-Control", "no-store");
-      } else {
+      } else if (ruta.includes("/assets/")) {
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      } else {
+        res.setHeader("Cache-Control", "public, max-age=3600");
       }
     },
   });

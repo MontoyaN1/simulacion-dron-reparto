@@ -196,7 +196,7 @@ main {
 }
 
 .stage-host {
-  touch-action: none;
+  touch-action: pan-y;
   overscroll-behavior: contain;
   position: absolute;
   inset: 0;
@@ -1018,6 +1018,7 @@ main {
 
 
 @media (max-width: 820px) {
+
   .app {
     padding: 14px 14px 32px;
   }
@@ -1049,6 +1050,7 @@ main {
 
 .fps-panel {
   position: absolute;
+  height: 26px;
   top: 106px;
   left: 50%;
   transform: translateX(-50%);
@@ -1071,4 +1073,19 @@ main {
   font-weight: 700;
   color: #8ff0ff;
   text-transform: none;
+}
+
+/* Overrides móviles al FINAL del archivo: la cascada los respeta (el bloque
+   base de .fps-panel vive más abajo y los pisaba). */
+@media (max-width: 820px) {
+  .mission-chip {
+    top: 118px;
+  }
+
+  .fps-panel {
+    position: static;
+    transform: none;
+    width: max-content;
+    margin: 8px auto 0;
+  }
 }

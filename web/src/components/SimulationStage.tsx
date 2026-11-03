@@ -27,6 +27,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   const sendRef = useRef(send);
   const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
   const [missionState, setMissionState] = useState<MissionState>("esperando");
+  const [sequenceHold, setSequenceHold] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
   sendRef.current = send;
 
@@ -72,6 +73,14 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     const scene = escenaActual;
     scene.attachBuffer(buffer);
     scene.attachMissionState((state) => setMissionState(state));
+    // Cesium lleva secuencia de personas y congela la simulación; three es
+    // misión continua y no la usa.
+    if ("attachHold" in scene) {
+      scene.attachHold((hold: boolean) => {
+        setSequenceHold(hold);
+        sendRef.current(hold ? { type: "pause" } : { type: "resume" });
+      });
+    }
 
     sceneRef.current = scene;
     return () => {
@@ -98,7 +107,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
           : "Iniciar vuelo";
 
   const handlePrimary = (): void => {
-    if (status.delivered) return;
+    if (status.delivered || sequenceHold) return;
     send({ type: running ? "pause" : "start" });
   };
 
@@ -175,7 +184,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
             type="button"
             className="button button-primary"
             onClick={handlePrimary}
-            disabled={status.delivered}
+            disabled={status.delivered || sequenceHold}
           >
             {primaryLabel}
           </button>

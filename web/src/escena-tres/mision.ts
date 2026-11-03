@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
+import { CITY_GROUND_HEIGHT } from "../cesium/constants";
 import { enuATres } from "./ciudad";
 import type { RouteGroundTable } from "../cesium/route-ground";
 import type { MissionState } from "../mision/tipos";
@@ -24,7 +25,6 @@ export class MisionTres {
   private anillos: THREE.Mesh[] = [];
   private destruida = false;
   private paqueteEntregado = false;
-  private ultimaFase: Telemetry["phase"] | null = null;
 
   constructor(
     private readonly corredor: RouteGroundTable,
@@ -74,7 +74,8 @@ export class MisionTres {
           routeFrame.displacement[1] - 1.0,
           0.13,
         ];
-        this.paquete.position.copy(enuATres(destino, this.corredor.agl(destino) ?? 0));
+        const agl = (this.corredor.agl(destino) ?? CITY_GROUND_HEIGHT) - CITY_GROUND_HEIGHT;
+        this.paquete.position.copy(enuATres(destino, agl));
         return;
       }
       return;
@@ -83,26 +84,17 @@ export class MisionTres {
     this.paquete.position.copy(belly);
   }
 
-  fijarEstado(sample: Telemetry, enUis: boolean, enUts: boolean): void {
+  fijarEstado(sample: Telemetry, _enUis: boolean, enUts: boolean): void {
     let estado: MissionState = "esperando";
-    if (sample.phase === "delivered" && (enUis || true)) estado = "completado";
-    else if (sample.phase === "descent" && enUis) estado = "animando_recepcion";
+    if (sample.phase === "delivered") estado = "completado";
+    else if (sample.phase === "descent" && _enUis) estado = "animando_recepcion";
     else if (sample.phase === "takeoff" && enUts) estado = "animando_entrega";
     else if (sample.phase === "cruise") estado = "paquete_cargado";
-    else if (enUts || enUis) estado = "en_zona";
+    else if (enUts || _enUis) estado = "en_zona";
     if (estado !== this.estado) {
       this.estado = estado;
       this.onEstado(estado);
     }
-    void this.ultimaFase;
-  }
-
-  hoverZ(): number | null {
-    return null;
-  }
-
-  shot(): PlanoCamara | null {
-    return null;
   }
 
   reset(): void {

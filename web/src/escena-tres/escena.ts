@@ -38,7 +38,6 @@ export class EscenaTres {
   private readonly dron = new THREE.Group();
   private dronMesh: THREE.Object3D | null = null;
   private readonly rotores: THREE.Object3D[] = [];
-  private readonly paquete = new THREE.Group();
   private readonly sombraSuelo: THREE.Mesh;
 
   private readonly trail: THREE.Line;
@@ -86,8 +85,16 @@ export class EscenaTres {
     // la página no haga scroll (era el choque reportado). Limitado 3\u201360 m.
     const canvas = this.renderer.domElement;
     canvas.addEventListener("wheel", (evento) => {
+      if (evento.ctrlKey) return; // el zoom de accesibilidad del navegador queda
       evento.preventDefault();
-      this.dist = Math.max(3, Math.min(60, this.dist * Math.exp(evento.deltaY * 0.001)));
+      // Firefox reporta líneas (deltaMode 1), no píxeles: normalizar.
+      const dy =
+        evento.deltaMode === 1
+          ? evento.deltaY * 16
+          : evento.deltaMode === 2
+            ? evento.deltaY * window.innerHeight
+            : evento.deltaY;
+      this.dist = Math.max(3, Math.min(60, this.dist * Math.exp(dy * 0.001)));
     }, { passive: false });
     this.mundo.background = new THREE.Color("#8fb4d8");
     this.mundo.fog = new THREE.Fog(new THREE.Color("#a9c4dd"), 1600, 4600);
@@ -103,7 +110,6 @@ export class EscenaTres {
     );
     this.sombraSuelo.rotation.x = -Math.PI / 2;
     this.mundo.add(this.sombraSuelo);
-    this.mundo.add(this.paquete);
 
     this.trail = new THREE.Line(
       new THREE.BufferGeometry(),
@@ -218,12 +224,8 @@ export class EscenaTres {
       this.dron.add(modelo);
       const carton = new THREE.MeshLambertMaterial({ color: "#c08a52" });
       const cinta = new THREE.MeshLambertMaterial({ color: "#9a6b39" });
-      const etiqueta = new THREE.MeshLambertMaterial({ color: "#f4f4f0" });
-      this.paquete.add(
-        new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.26), carton),
-        new THREE.Mesh(new THREE.BoxGeometry(0.346, 0.224, 0.06), cinta),
-        new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.075, 0.266), etiqueta),
-      );
+      void carton;
+      void cinta;
     } catch (error) {
       console.warn("[tres] No se pudo cargar el dron", error);
     }
@@ -237,11 +239,15 @@ export class EscenaTres {
     this.onEstado = onEstado;
   }
 
-  setRoute(ruta: readonly Vec3[]): void {    const puntos = ruta.map((punto) => {
-      const agl = this.alturaSuelo([punto[0], punto[1], 0]);
-      return enuATres(punto, agl + punto[2]);
-    });
-    this.ruta.geometry.setFromPoints(puntos);
+  setRoute(ruta: readonly Vec3[]): void {
+    if (ruta.length === 0) return;
+    // Geometría nueva: en three 0.187 el setFromPoints sobre un buffer vacío
+    // no lo agranda y la ruta nunca llega a dibujarse.
+    const puntos = ruta.map((punto) =>
+      enuATres(punto, this.alturaSuelo([punto[0], punto[1], 0])),
+    );
+    this.ruta.geometry.dispose();
+    this.ruta.geometry = new THREE.BufferGeometry().setFromPoints(puntos);
     const caja = new THREE.Box3().setFromPoints(puntos);
     const centro = caja.getCenter(new THREE.Vector3());
     this.camara.position.set(centro.x, centro.y + 380, centro.z - 40);
@@ -256,11 +262,11 @@ export class EscenaTres {
 
   /** Posición visual del dron (z already clamped al terreno real). */
   private displayDron(sample: Telemetry): Vec3 {
-    const enu2: Vec3 = [sample.position[0], sample.position[1], 0];
-    const agl = this.alturaSuelo(enu2);
-    const z = Math.max(sample.position[2] + GEAR_CLEARANCE, agl * 0 + GEAR_CLEARANCE);
-    void z;
-    return [sample.position[0], sample.position[1], sample.position[2] + GEAR_CLEARANCE];
+    return [
+      sample.position[0],
+      sample.position[1],
+      sample.position[2] + GEAR_CLEARANCE,
+    ];
   }
 
   /** Rotores girando, inclinación según la aceleración y rastro del vuelo. */
@@ -350,7 +356,7 @@ export class EscenaTres {
     const aglDron = this.alturaSuelo(display);
     const puntoBelly = enuATres(
       [display[0], display[1], display[2] - 0.236],
-      aglDron + display[2] - 0.236,
+      aglDron,
     );
     this.mision.actualizarPaquete(sample, puntoBelly);
     this.mision.fijarEstado(
