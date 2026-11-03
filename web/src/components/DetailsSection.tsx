@@ -396,7 +396,7 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
 
         <article className="card">
           <div className="card-head">
-            <h2>Temas del documento</h2>
+            <h2>Parámetros importantes</h2>
             <span className="chip">11 de 11 en vivo</span>
           </div>
           <ul className="topics">
