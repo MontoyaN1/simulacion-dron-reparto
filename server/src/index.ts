@@ -61,6 +61,17 @@ if (existsSync(webDist)) {
     prefix: "/",
     wildcard: false,
     index: false,
+    cacheControl: false,
+    // index.html a no-store: un html cacheado apunta a assets con hash de un
+    // build viejo (yield: "La página queda en blanco hasta un reload duro").
+    // Los assets con hash son inmutables.
+    setHeaders: (res, ruta) => {
+      if (ruta.endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store");
+      } else {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      }
+    },
   });
   app.head("/", async (_request, reply) => reply.send());
   app.get("/", async (_request, reply) => reply.sendFile("index.html"));
