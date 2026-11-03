@@ -113,6 +113,12 @@ export class EscenaTres {
     this.resizeObs.observe(container);
     this.redimension();
 
+    // Diagnóstico remoto: con ?debug queda el manejador expuesto, incluso en
+    // producción, para poder medir la escena con herramientas externas.
+    if (new URLSearchParams(window.location.search).has("debug")) {
+      (window as unknown as Record<string, unknown>).__dronScene = this;
+    }
+
     void this.levantarCiudad();
     void this.levantarDron();
     requestAnimationFrame(this.bucle);
