@@ -3,6 +3,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import { geodeticToEnu, routeFrame, type Vec3 } from "@dron/shared";
 import rangeFootprintGrounds from "../cesium/ground-footprints.json";
 import { pointInside } from "../cesium/buildings";
+import { CITY_GROUND_HEIGHT } from "../cesium/constants";
 import type { RouteGroundTable } from "../cesium/route-ground";
 
 /** three.js usa Y-arriba: ENU (este, norte, arriba) → (x, y, z). */
@@ -138,7 +139,9 @@ const mallaTerreno = (corredor: RouteGroundTable): THREE.BufferGeometry => {
         DIRECCION[1] * along + LADO[1] * lateral,
         0,
       ];
-      const agl = corredor.agl(enu) ?? 0;
+      // Altura RELATIVA al ancla: el corredor guarda msnm y el mundo three
+      // vive en metros sobre el plano de la UTS (igual que el dron).
+      const agl = (corredor.agl(enu) ?? CITY_GROUND_HEIGHT) - CITY_GROUND_HEIGHT;
       posiciones.push(enu[0], agl, enu[1]);
 
       // El mosaico cubre [cajaM.izq..cajaM.der] × [cajaM.arriba..cajaM.abajo]
@@ -210,7 +213,11 @@ const edificiosFusionados = async (
     if (Math.hypot(centro[0] - routeFrame.displacement[0], centro[1] - routeFrame.displacement[1]) < 20) continue;
 
     const ancla = ring[0];
-    const suelo = sueloEdificio(ancla[0], ancla[1]) ?? corredor.agl(centro) ?? 0;
+    const sueloMsnm =
+      sueloEdificio(ancla[0], ancla[1]) ??
+      corredor.agl(centro) ??
+      CITY_GROUND_HEIGHT;
+    const suelo = sueloMsnm - CITY_GROUND_HEIGHT;
     const altura =
       feature.properties?.height && feature.properties.height > 1
         ? feature.properties.height
