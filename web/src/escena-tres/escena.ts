@@ -34,6 +34,8 @@ export class EscenaTres {
   private readonly contenedor: HTMLElement;
   private readonly corredor: RouteGroundTable;
   private readonly mision: MisionTres;
+  private ciudad: THREE.Group | null = null;
+  private readonly colision = new THREE.Raycaster();
 
   private readonly dron = new THREE.Group();
   private dronMesh: THREE.Object3D | null = null;
@@ -205,6 +207,7 @@ export class EscenaTres {
     try {
       const ciudad = await construirCiudad(this.corredor);
       if (this.destruida) return;
+      this.ciudad = ciudad.grupo;
       this.mundo.add(ciudad.grupo);
     } catch (error) {
       console.warn("[tres] No se pudo construir la ciudad", error);
@@ -325,7 +328,7 @@ export class EscenaTres {
         objetivo.y + 2.35 * (distancia / 8.6),
         objetivo.z - Math.cos(this.rumboActual) * distancia - 0.65 * Math.sin(this.rumboActual),
       );
-      this.camara.position.lerp(suave, 1 - Math.exp(-dt * 6));
+      this.camara.position.lerp(this.posicionSegura(objetivo, suave), 1 - Math.exp(-dt * 6));
       this.camara.lookAt(objetivo);
       return;
     }
@@ -337,31 +340,49 @@ export class EscenaTres {
         objetivo.y + 5.8 * (efectiva / 12.5) + 2,
         objetivo.z + Math.sin(this.orbita) * efectiva,
       );
-      this.camara.position.lerp(deorb, 0.25);
+      this.camara.position.lerp(this.posicionSegura(objetivo, deorb), 0.25);
       this.camara.lookAt(objetivo);
       return;
     }
     if (this.modo === "top") {
       const visto = new THREE.Vector3(objetivo.x, objetivo.y + this.dist * 10, objetivo.z - 0.01);
-      this.camara.position.lerp(visto, 0.08);
+      this.camara.position.lerp(this.posicionSegura(objetivo, visto), 0.08);
       this.camara.lookAt(objetivo);
       return;
     }
     this.camara.lookAt(objetivo);
   }
 
+  /** Evita que la cámara atraviese edificios o baje bajo el terreno. */
+  private posicionSegura(objetivo: THREE.Vector3, deseada: THREE.Vector3): THREE.Vector3 {
+    const vector = deseada.clone().sub(objetivo);
+    const distancia = vector.length();
+    if (distancia < 0.001) return deseada;
+    vector.normalize();
+    this.colision.set(objetivo, vector);
+    this.colision.far = distancia;
+    const impactos = this.ciudad
+      ? this.colision.intersectObject(this.ciudad, true)
+      : [];
+    if (impactos.length > 0 && impactos[0].distance < distancia) {
+      return impactos[0].point.clone().addScaledVector(vector, -2.5);
+    }
+    return deseada;
+  }
+
   /** Bucle principal: minestro telemetría, misión, toma cinematográfica, render. */
   private readonly bucle = (): void => {
     requestAnimationFrame(this.bucle);
     if (this.destruida) return;
-    const ahora = performance.now();
-    const dt = Math.min(0.1, Math.max(0.001, (ahora - this.lastFrame) / 1000));
-    this.lastFrame = ahora;
-    const sample = this.buffer?.sample();
-    if (!sample) {
-      this.renderer.render(this.mundo, this.camara);
-      return;
-    }
+    try {
+      const ahora = performance.now();
+      const dt = Math.min(0.1, Math.max(0.001, (ahora - this.lastFrame) / 1000));
+      this.lastFrame = ahora;
+      const sample = this.buffer?.sample();
+      if (!sample) {
+        this.renderer.render(this.mundo, this.camara);
+        return;
+      }
 
     // Reset del servidor: repetir el encuadre amplio evita que el primer
     // frame lleve la cámara dentro de los edificios del pad.
@@ -393,7 +414,12 @@ export class EscenaTres {
     this.actualizarDron(sample, dt);
     this.camaraActualiza(sample, dt);
 
-    this.renderer.render(this.mundo, this.camara);
+      this.renderer.render(this.mundo, this.camara);
+    } catch (error) {
+      // Un asset/capa async no puede matar el loop: el siguiente frame sigue
+      // vivo y la consola conserva la causa para depuración.
+      console.error("[tres] frame recuperado", error);
+    }
   };
 
   destroy(): void {

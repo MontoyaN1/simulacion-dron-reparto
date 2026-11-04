@@ -259,7 +259,9 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
 
   const terreno = new THREE.Mesh(
     malla,
-    new THREE.MeshLambertMaterial({ map: textura }),
+    // La ortofoto es una textura de referencia, no depende de la iluminación
+    // de la escena: MeshBasic evita que la ciudad desaparezca en sombra.
+    new THREE.MeshBasicMaterial({ map: textura }),
   );
 
   const { geo: edifGeo, cuenta } = await edificiosFusionados(corredor);
