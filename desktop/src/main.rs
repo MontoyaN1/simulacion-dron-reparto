@@ -1,9 +1,7 @@
 //! Simulación del corredor UTS→UIS en Bevy (cliente nativo autónomo).
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin};
-use bevy::asset::RenderAssetUsages;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::render::render_asset::RenderAssetUsages as _RenderAssetUsagesAlias;
 
 
 mod nucleo;
@@ -62,7 +60,7 @@ fn malla_corredor() -> Mesh {
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, bevy::render::render_asset::RenderAssetUsages::default());
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, posiciones);
     malla.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     malla.insert_indices(Indices::U32(indices));
@@ -147,7 +145,7 @@ fn main() {
         ))
         .add_systems(Startup, construir_escena)
         .add_systems(FixedUpdate, avanzar_vuelo)
-        .add_systems(Update, panel_telemetria)
+        .add_systems(PostUpdate, panel_telemetria)
         .insert_resource(Time::<Fixed>::from_hz(30.0))
         .run();
 }

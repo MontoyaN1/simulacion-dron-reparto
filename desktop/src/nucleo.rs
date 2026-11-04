@@ -1,6 +1,5 @@
 //! Núcleo limpio: constantes, motor de vuelo y planificación A*.
 
-use serde::Deserialize;
 
 /// Altura msnm del origen ENU (la UTS). Toda altura del mundo 3D es relativa a ella.
 pub const ALTURA_ANCLA_MSNM: f64 = 938.5;

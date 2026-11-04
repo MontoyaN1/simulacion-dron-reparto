@@ -5,7 +5,7 @@ edition = "2021"
 description = "Simulación 3D del corredor UTS→UIS en Bevy (cliente nativo autónomo)"
 
 [dependencies]
-bevy = { version = "0.16", features = ["bevy_gltf"] }
+bevy = { version = "0.16", features = ["bevy_gltf", "jpeg"] }
 bevy_egui = "0.35"
 egui = "0.31"
 parry3d-f64 = "0.17"
