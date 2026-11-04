@@ -145,7 +145,7 @@ fn main() {
         ))
         .add_systems(Startup, construir_escena)
         .add_systems(FixedUpdate, avanzar_vuelo)
-        .add_systems(PostUpdate, panel_telemetria)
+        .add_systems(bevy_egui::EguiPrimaryContextPass, panel_telemetria)
         .insert_resource(Time::<Fixed>::from_hz(30.0))
         .run();
 }
