@@ -75,39 +75,18 @@ const cajaMosaico = (caja: CajaGrados) => {
   };
 };
 
-/** Satelital del corredor como UNA textura pegada desde el proxy propio. */
-const texturaMosaico = async (caja: CajaGrados): Promise<THREE.CanvasTexture> => {
-  const plana = cajaMosaico(caja);
-  const canvas = document.createElement("canvas");
-  canvas.width = plana.columnas * 256;
-  canvas.height = plana.filas * 256;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#7e8f7a";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const textura = new THREE.CanvasTexture(canvas);
+/**
+ * Satelital del corredor HORNEADA: la imagen se muestreó una vez del proxy
+ * (tiles de Esri, nivel 17) y queda versionada en
+ * web/public/models/corredor-horneado.jpg. Cero peticiones de tiles en
+ * vuelo: el mapa ya no depende de Esri ni ion.
+ */
+const texturaHorneada = async (): Promise<THREE.Texture> => {
+  const textura = await new THREE.TextureLoader().loadAsync(
+    "/models/corredor-horneado.jpg",
+  );
   textura.colorSpace = THREE.SRGBColorSpace;
   textura.anisotropy = 4;
-
-  let porCargar = plana.columnas * plana.filas;
-  for (let fila = 0; fila < plana.filas; fila += 1) {
-    for (let col = 0; col < plana.columnas; col += 1) {
-      const xTile = plana.xInicio + col;
-      const yTile = plana.yInicio + fila;
-      const img = new Image();
-      img.decoding = "async";
-      img.onload = () => {
-        ctx.drawImage(img, col * 256, fila * 256, 256, 256);
-        porCargar -= 1;
-        if (porCargar <= 0 || porCargar % 10 === 0) textura.needsUpdate = true;
-      };
-      img.onerror = () => {
-        porCargar -= 1;
-      };
-      img.src = `/tiles/esri/${NIVEL}/${yTile}/${xTile}`;
-    }
-  }
-  textura.needsUpdate = true;
   return textura;
 };
 
@@ -269,7 +248,7 @@ export interface CiudadTres {
 /** Terreno con imagen horneada + edificios fusionados. */
 export const construirCiudad = async (corredor: RouteGroundTable): Promise<CiudadTres> => {
   const caja = cajaCorredor();
-  const textura = await texturaMosaico(caja);
+  const textura = await texturaHorneada();
   const plana = cajaMosaico(caja);
 
   const malla = mallaTerreno(corredor);

@@ -67,7 +67,8 @@ export class EscenaTres {
     this.corredor = opciones.corredor;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
+    // Presupuesto de píxeles: dpr alto en iGPU era la mitad del coste.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
     this.renderer.setSize(Math.max(2, container.clientWidth), Math.max(2, container.clientHeight));
     container.appendChild(this.renderer.domElement);
 
@@ -321,10 +322,11 @@ export class EscenaTres {
     }
     if (this.modo === "orbit") {
       this.orbita += dt * 0.12;
+      const efectiva = Math.min(this.dist * 1.4, display[2] < 25 ? 11 : 80);
       const deorb = new THREE.Vector3(
-        objetivo.x + Math.cos(this.orbita) * this.dist,
-        objetivo.y + 5.8 * (this.dist / 12.5) + 2,
-        objetivo.z + Math.sin(this.orbita) * this.dist,
+        objetivo.x + Math.cos(this.orbita) * efectiva,
+        objetivo.y + 5.8 * (efectiva / 12.5) + 2,
+        objetivo.z + Math.sin(this.orbita) * efectiva,
       );
       this.camara.position.lerp(deorb, 0.25);
       this.camara.lookAt(objetivo);
