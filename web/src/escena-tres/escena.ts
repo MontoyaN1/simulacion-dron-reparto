@@ -58,6 +58,8 @@ export class EscenaTres {
   private rollFuselage = 0;
   private orbita = 0;
   private camaraBloqueada = true;
+  private liberarCamaraEn = performance.now() + 2400;
+  private ultimoT = 0;
   /** Altura suavizada del terreno bajo el dron (m sobre el ancla). */
   private lastTrail = performance.now();
   private resizeObs: ResizeObserver;
@@ -253,7 +255,8 @@ export class EscenaTres {
     const centro = caja.getCenter(new THREE.Vector3());
     this.camara.position.set(centro.x, centro.y + 380, centro.z - 40);
     this.camara.lookAt(centro);
-    this.camaraBloqueada = false;
+    this.camaraBloqueada = true;
+    this.liberarCamaraEn = performance.now() + 2400;
   }
 
   setCameraMode(modo: CameraMode): void {
@@ -305,16 +308,22 @@ export class EscenaTres {
   }
 
   private camaraActualiza(sample: Telemetry, dt: number): void {
-    if (this.camaraBloqueada) return;
+    if (this.camaraBloqueada) {
+      if (performance.now() < this.liberarCamaraEn) return;
+      this.camaraBloqueada = false;
+    }
     const display = this.displayDron(sample);
     const agl = this.alturaSuelo(display);
     const objetivo = new THREE.Vector3(display[0], agl + display[2], display[1]);
     if (this.modo === "chase") {
       const lateral = 0.65 * Math.cos(this.rumboActual);
+      // El pad tiene edificios a ambos lados del dron: 22 m todavía puede
+      // acabar dentro de una huella al arrancar. 35 m deja un plano abierto.
+      const distancia = display[2] < 25 ? Math.max(this.dist, 35) : this.dist;
       const suave = new THREE.Vector3(
-        objetivo.x - Math.sin(this.rumboActual) * this.dist + lateral,
-        objetivo.y + 2.35 * (this.dist / 8.6),
-        objetivo.z - Math.cos(this.rumboActual) * this.dist - 0.65 * Math.sin(this.rumboActual),
+        objetivo.x - Math.sin(this.rumboActual) * distancia + lateral,
+        objetivo.y + 2.35 * (distancia / 8.6),
+        objetivo.z - Math.cos(this.rumboActual) * distancia - 0.65 * Math.sin(this.rumboActual),
       );
       this.camara.position.lerp(suave, 1 - Math.exp(-dt * 6));
       this.camara.lookAt(objetivo);
@@ -353,6 +362,20 @@ export class EscenaTres {
       this.renderer.render(this.mundo, this.camara);
       return;
     }
+
+    // Reset del servidor: repetir el encuadre amplio evita que el primer
+    // frame lleve la cámara dentro de los edificios del pad.
+    if (sample.t + 1 < this.ultimoT) {
+      this.camaraBloqueada = true;
+      this.liberarCamaraEn = ahora + 2400;
+      if (this.ruta.geometry.getAttribute("position")) {
+        const caja = new THREE.Box3().setFromObject(this.ruta);
+        const centro = caja.getCenter(new THREE.Vector3());
+        this.camara.position.set(centro.x, centro.y + 380, centro.z - 40);
+        this.camara.lookAt(centro);
+      }
+    }
+    this.ultimoT = sample.t;
 
     const display = this.displayDron(sample);
     const aglDron = this.alturaSuelo(display);
