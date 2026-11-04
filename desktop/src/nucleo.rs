@@ -35,10 +35,8 @@ pub enum Fase {
 pub struct MuestraTelemetria {
     pub t: f64,
     pub posicion: Enu,
-    pub velocidad: Enu,
     pub rumbo_grados: f64,
     pub velocidad_total: f64,
-    pub altitud_agl: f64,
     pub bateria_porcentaje: f64,
     pub dist_recorrida: f64,
     pub dist_restante: f64,
@@ -80,10 +78,13 @@ impl MotorVuelo {
         for i in 1..ruta.len() {
             total += distancia(&ruta[i - 1], &ruta[i]);
         }
+        // El dron nace en el primer punto de la ruta (no en el origen ENU):
+        // la ruta arranca sobre el terreno, que puede estar bajo el ancla.
+        let inicio = *ruta.first().unwrap_or(&[0.0, 0.0, 0.0]);
         MotorVuelo {
             ruta,
             total,
-            pos: [0.0, 0.0, 0.0],
+            pos: inicio,
             vel: [0.0, 0.0, 0.0],
             t: 0.0,
             wp: 0,
@@ -141,10 +142,8 @@ impl MotorVuelo {
         MuestraTelemetria {
             t: self.t,
             posicion: [self.pos[0], self.pos[1], altitud],
-            velocidad,
             rumbo_grados: self.rumbog,
             velocidad_total,
-            altitud_agl: altitud,
             bateria_porcentaje: bateria,
             dist_recorrida: self.recorrido,
             dist_restante: restante,
