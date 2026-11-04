@@ -1,0 +1,19 @@
+[package]
+name = "dron-reparto-desktop"
+version = "1.0.0"
+edition = "2021"
+description = "Simulación 3D del corredor UTS→UIS en Bevy (cliente nativo autónomo)"
+
+[dependencies]
+bevy = { version = "0.16", features = ["bevy_gltf"] }
+bevy_egui = "0.35"
+egui = "0.31"
+parry3d-f64 = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
