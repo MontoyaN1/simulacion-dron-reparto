@@ -7,15 +7,32 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy_egui::{EguiContexts, EguiPlugin};
 
 mod escena;
+mod matematica;
 mod nucleo;
 
 use escena::{Camara, Corredor, EscenaPlugin, Vuelo};
-use nucleo::Fase;
+use matematica::{vec3, LiveAlgebra, Mat3};
+use nucleo::{Fase, MuestraTelemetria};
 
 const FONDO: egui::Color32 = egui::Color32::from_rgb(11, 18, 32);
 const ACENTO: egui::Color32 = egui::Color32::from_rgb(56, 189, 248);
 const TEXTO: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);
 const TENUE: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);
+// Mismo sistema de color que la versión web (valores pre-multiplicados).
+const TARJETA: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 22, 34, 209);
+const BORDE: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 26, 30, 41);
+const VERDE: egui::Color32 = egui::Color32::from_rgb(34, 197, 94);
+const VIVO: egui::Color32 = egui::Color32::from_rgb(125, 211, 252);
+const CELDA: egui::Color32 = egui::Color32::from_rgb(203, 230, 247);
+const VERDE_FILAFONDO: egui::Color32 = egui::Color32::from_rgba_premultiplied(2, 10, 5, 13);
+const VERDE_FILABORDE: egui::Color32 = egui::Color32::from_rgba_premultiplied(6, 36, 17, 46);
+const VERDE_CHIPFONDO: egui::Color32 = egui::Color32::from_rgba_premultiplied(4, 24, 11, 31);
+const VERDE_CHIPBORDE: egui::Color32 = egui::Color32::from_rgba_premultiplied(12, 69, 33, 90);
+const CIAN_FONDO: egui::Color32 = egui::Color32::from_rgba_premultiplied(7, 23, 30, 31);
+const CIAN_BORDE: egui::Color32 = egui::Color32::from_rgba_premultiplied(22, 76, 100, 102);
+const CIAN_TEXTO: egui::Color32 = egui::Color32::from_rgb(186, 230, 253);
+const VERDE_TEXTO: egui::Color32 = egui::Color32::from_rgb(134, 239, 172);
+const CUADRO_MATRIZ: egui::Color32 = egui::Color32::from_rgba_premultiplied(3, 5, 9, 140);
 
 fn main() {
     // Anisotropía 16: sin ella la ortofoto se ve en bloques al verla de
@@ -70,17 +87,79 @@ fn metrica(ui: &mut egui::Ui, titulo: &str, valor: String) {
     ui.add_space(26.0);
 }
 
+/// Datos fijos de la ruta y del marco ENU (se calculan una sola vez).
+struct DatosRuta {
+    edificios: u32,
+    bloquean: u32,
+    waypoints: u32,
+    desvio: f64,
+    distancia: f64,
+    rumbo: f64,
+    escala: f64,
+    destino: [f64; 2],
+    dir_h: [f64; 3],
+    matriz: Mat3,
+}
+
+fn datos_ruta(corredor: &Corredor, vuelo: &Vuelo) -> DatosRuta {
+    let (edificios, bloquean) = escena::contar_edificios(corredor);
+    let ruta = &vuelo.ruta;
+    let mut total = 0.0;
+    for i in 1..ruta.len() {
+        total += nucleo::distancia(&ruta[i - 1], &ruta[i]);
+    }
+    let recta = nucleo::distancia(&ruta[0], &ruta[ruta.len() - 1]);
+    let [dx, dn] = corredor.desplazamiento;
+    let dist = corredor.largo;
+    DatosRuta {
+        edificios,
+        bloquean,
+        waypoints: ruta.len() as u32,
+        desvio: if recta > 0.0 {
+            (total / recta - 1.0) * 100.0
+        } else {
+            0.0
+        },
+        distancia: dist,
+        rumbo: (dx.atan2(dn) * 180.0 / std::f64::consts::PI + 360.0) % 360.0,
+        escala: dist / matematica::ACADEMICO_NORM,
+        destino: [
+            dx * matematica::ACADEMICO_NORM / dist,
+            dn * matematica::ACADEMICO_NORM / dist,
+        ],
+        dir_h: [dx / dist, dn / dist, 0.0],
+        matriz: matematica::matriz_enu(escena::LAT_UTS, escena::LON_UTS),
+    }
+}
+
 fn hud(
     mut contexts: EguiContexts,
     mut vuelo: ResMut<Vuelo>,
     corredor: Res<Corredor>,
     mut camara: ResMut<Camara>,
     tiempo: Res<Time>,
+    mut datos: Local<Option<DatosRuta>>,
+    mut abierto: Local<Option<bool>>,
 ) {
     let ctx = contexts.ctx_mut().expect("egui ctx");
     let m = vuelo.motor.telemetria();
     // Altura real sobre el terreno (no sobre el ancla).
     let sobre_suelo = m.posicion[2] - corredor.agl(m.posicion[0], m.posicion[1]);
+
+    let panel_abierto = abierto.unwrap_or(true);
+    let mut toggle = ctx.input(|i| i.key_pressed(egui::Key::M));
+
+    if panel_abierto {
+        egui::SidePanel::left("modelo")
+            .default_width(370.0)
+            .min_width(320.0)
+            .max_width(560.0)
+            .resizable(true)
+            .frame(egui::Frame::NONE.fill(FONDO))
+            .show(ctx, |ui| {
+                panel_modelo(ui, &m, datos.get_or_insert_with(|| datos_ruta(&corredor, &vuelo)))
+            });
+    }
 
     egui::TopBottomPanel::top("barra")
         .frame(egui::Frame::NONE.fill(FONDO).inner_margin(egui::Margin::symmetric(16, 9)))
@@ -102,21 +181,27 @@ fn hud(
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reiniciar").clicked() {
-                        vuelo.reiniciar();
-                    }
-                    let etiqueta = if vuelo.pausado { "Reanudar" } else { "Pausar" };
-                    if ui.button(etiqueta).clicked() {
-                        vuelo.pausado = !vuelo.pausado;
-                    }
                     ui.label(
                         egui::RichText::new(format!("{:.0} fps", 1.0 / tiempo.delta_secs().max(1e-4)))
                             .color(TENUE)
                             .monospace(),
                     );
+                    let etiqueta = if vuelo.pausado { "Reanudar" } else { "Pausar" };
+                    if ui.button(etiqueta).clicked() {
+                        vuelo.pausado = !vuelo.pausado;
+                    }
+                    if ui.button("Reiniciar").clicked() {
+                        vuelo.reiniciar();
+                    }
+                    if ui.button("MODELO").clicked() {
+                        toggle = true;
+                    }
                 });
             });
         });
+    if toggle {
+        *abierto = Some(!panel_abierto);
+    }
 
     egui::TopBottomPanel::bottom("telemetria")
         .frame(egui::Frame::NONE.fill(FONDO).inner_margin(egui::Margin::symmetric(16, 10)))
@@ -131,7 +216,7 @@ fn hud(
                 metrica(ui, "RECORRIDO", format!("{:.0} m", m.dist_recorrida));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new("arrastra: orbitar · rueda: zoom · R: seguir dron")
+                        egui::RichText::new("arrastra: orbitar · rueda: zoom · R: seguir dron · M: modelo")
                             .color(TENUE)
                             .size(11.0),
                     );
@@ -148,6 +233,255 @@ fn hud(
             });
             ui.add_space(2.0);
         });
+}
+
+/// Panel "Modelo matemático": la misma información que la versión web
+/// (ruta real, matriz ENU y los 11 temas del proyecto), calculada en vivo.
+fn panel_modelo(ui: &mut egui::Ui, m: &MuestraTelemetria, d: &DatosRuta) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("MODELO MATEMÁTICO").color(TEXTO).strong().size(14.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            chip(ui, "EN VIVO", Some(CIAN_FONDO), CIAN_BORDE, CIAN_TEXTO);
+        });
+    });
+    ui.add_space(10.0);
+    let a = matematica::algebra_en_vivo(&m.posicion, &m.vel, &d.matriz, &d.dir_h);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            tarjeta_ruta(ui, d);
+            ui.add_space(12.0);
+            tarjeta_matriz(ui, &a, &d.matriz);
+            ui.add_space(12.0);
+            tarjeta_temas(ui, &a);
+        });
+    ui.add_space(12.0);
+}
+
+/// Marco con el fondo y el borde de la versión web.
+fn cuadro(ui: &mut egui::Ui, contenido: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(TARJETA)
+        .stroke(egui::Stroke::new(1.0_f32, BORDE))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, contenido);
+}
+
+fn cabeza(ui: &mut egui::Ui, titulo: &str, etiqueta: &str, verde: bool) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(titulo).color(TEXTO).strong().size(13.5));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            chip(
+                ui,
+                etiqueta,
+                if verde { Some(VERDE_CHIPFONDO) } else { None },
+                if verde { VERDE_CHIPBORDE } else { BORDE },
+                if verde { VERDE_TEXTO } else { TENUE },
+            );
+        });
+    });
+    ui.add_space(10.0);
+}
+
+fn chip(
+    ui: &mut egui::Ui,
+    texto: &str,
+    fill: Option<egui::Color32>,
+    borde: egui::Color32,
+    color: egui::Color32,
+) {
+    egui::Frame::new()
+        .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
+        .stroke(egui::Stroke::new(1.0_f32, borde))
+        .corner_radius(999.0)
+        .inner_margin(egui::Margin {
+            left: 9,
+            right: 9,
+            top: 4,
+            bottom: 4,
+        })
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(texto).color(color).monospace().size(9.5));
+        });
+}
+
+/// Fila "clave — valor" (el valor va a la derecha, en monoespaciada).
+fn hecho(ui: &mut egui::Ui, clave: &str, valor: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(clave).color(TENUE).size(11.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+            ui.label(egui::RichText::new(valor).color(TEXTO).monospace().size(11.0));
+        });
+    });
+    ui.add_space(5.0);
+}
+
+fn tarjeta_ruta(ui: &mut egui::Ui, d: &DatosRuta) {
+    cuadro(ui, |ui| {
+        cabeza(ui, "Ruta real", "perfil realista", false);
+        hecho(ui, "Distancia", &format!("{:.2} km", d.distancia / 1000.0));
+        hecho(ui, "Rumbo", &format!("{:.2}°", d.rumbo));
+        hecho(ui, "Escala académica", &format!("{:.1} m/u", d.escala));
+        hecho(
+            ui,
+            "Destino académico",
+            &format!("({:.3}, {:.3}, 0.000)", d.destino[0], d.destino[1]),
+        );
+        hecho(ui, "Edificios OSM", &d.edificios.to_string());
+        hecho(ui, "Bloquean el crucero", &d.bloquean.to_string());
+        hecho(ui, "Waypoints", &format!("{} · desvío {:.2} %", d.waypoints, d.desvio));
+    });
+}
+
+fn tarjeta_matriz(ui: &mut egui::Ui, a: &LiveAlgebra, matriz: &Mat3) {
+    cuadro(ui, |ui| {
+        cabeza(ui, "Matriz ENU", "T(x) = R·x", false);
+        egui::Frame::new()
+            .fill(CUADRO_MATRIZ)
+            .stroke(egui::Stroke::new(1.0_f32, BORDE))
+            .corner_radius(10.0)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                for fila in 0..3 {
+                    ui.horizontal(|ui| {
+                        for col in 0..3 {
+                            ui.add_sized(
+                                [76.0, 16.0],
+                                egui::Label::new(
+                                    egui::RichText::new(format!("{:>11.5}", matriz[fila][col]))
+                                        .color(CELDA)
+                                        .monospace()
+                                        .size(10.5),
+                                ),
+                            );
+                            ui.add_space(4.0);
+                        }
+                    });
+                    ui.add_space(3.0);
+                }
+            });
+        ui.add_space(10.0);
+        hecho(ui, "det(R)", &format!("{:.5}", a.rot_det));
+        hecho(ui, "Rango", &a.rot_rank.to_string());
+        hecho(ui, "ker(R)", "{(0, 0, 0)}");
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Rotación ortonormal: isomorfismo entre ECEF y ENU. Es la transformación lineal que el panel usa en vivo.",
+            )
+            .color(TENUE)
+            .size(10.0),
+        );
+    });
+}
+
+/// Fila de tema: punto verde, nombre, detalle y valor en vivo.
+fn tema(ui: &mut egui::Ui, nombre: &str, detalle: &str, valor: &str) {
+    egui::Frame::new()
+        .fill(VERDE_FILAFONDO)
+        .stroke(egui::Stroke::new(1.0_f32, VERDE_FILABORDE))
+        .corner_radius(9.0)
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 8,
+            top: 6,
+            bottom: 6,
+        })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (_id, r) = ui.allocate_space(egui::vec2(6.0, 34.0));
+                ui.painter().circle_filled(egui::pos2(r.min.x + 3.0, r.min.y + 3.0), 3.0, VERDE);
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(nombre).color(TEXTO).size(11.5));
+                    ui.label(egui::RichText::new(detalle).color(TENUE).monospace().size(9.5));
+                    ui.label(egui::RichText::new(valor).color(VIVO).monospace().size(10.5));
+                });
+            });
+        });
+    ui.add_space(6.0);
+}
+
+fn tarjeta_temas(ui: &mut egui::Ui, a: &LiveAlgebra) {
+    cuadro(ui, |ui| {
+        cabeza(ui, "Parámetros importantes", "11 de 11 en vivo", true);
+        // Los 11 temas del proyecto, con las mismas etiquetas que la web.
+        // Nota: sin circunflejos combinantes (la fuente no los trae).
+        tema(
+            ui,
+            "Vectores",
+            "p = (x, y, z) y su norma",
+            &format!("‖p‖ = {:.1} m", a.dist_origen),
+        );
+        tema(
+            ui,
+            "Recta paramétrica y cartesiana",
+            "L(t) = p + t·ĥ",
+            &format!("ĥ = {}", vec3(&a.rumbo_vec, 3)),
+        );
+        tema(
+            ui,
+            "Ecuación del plano",
+            "z = h del crucero",
+            &format!("z = {:.1} m", a.altitude),
+        );
+        tema(
+            ui,
+            "Producto interno y norma",
+            "v · n con n = (0, 1, 0)",
+            &format!(
+                "{:.2} m/s · rumbo {:.1}°",
+                a.norte_dot, a.rumbo_grados
+            ),
+        );
+        tema(
+            ui,
+            "Proyecciones ortogonales",
+            "P·p sobre z = 0",
+            &vec3(&a.ground, 1),
+        );
+        tema(
+            ui,
+            "Espacios y subespacios",
+            "H = {v : v_z = 0}",
+            "dim H = 2 · plano xy",
+        );
+        tema(
+            ui,
+            "Espacio generado",
+            "span{ĥ, r, k}",
+            &format!("dim = {} · det = {:.3}", a.dir_rank, a.dir_det),
+        );
+        tema(
+            ui,
+            "Combinaciones lineales",
+            "p = a·ĥ + b·r + c·k",
+            &format!(
+                "a = {:.1} · b = {:.1} · c = {:.1}",
+                a.along, a.lateral, a.altitude
+            ),
+        );
+        tema(
+            ui,
+            "Transformaciones lineales",
+            "T(v) = R·v en ENU",
+            &format!("‖R·v‖ = {:.2} m/s = ‖v‖", a.vel_rotada),
+        );
+        tema(
+            ui,
+            "Núcleo e imagen",
+            "ker P = ⟨k⟩ · Im P = plano xy",
+            "nulidad 1 · rango 2",
+        );
+        tema(
+            ui,
+            "Matriz, rango e isomorfismo",
+            "R ortonormal",
+            &format!("rango {} · det {:.3}", a.rot_rank, a.rot_det),
+        );
+    });
 }
 
 /** Con `FPS=1` imprime el fps medio cada 5 s (para medir sin mirar el HUD). */

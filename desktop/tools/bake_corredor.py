@@ -17,12 +17,12 @@ from PIL import Image
 
 LON_UTS, LAT_UTS = -73.123524, 7.1051164
 LON_UIS, LAT_UIS = -73.1198652, 7.1409311
-NIVEL = 18
+NIVEL = 19
 TILE = 256
 SALIDA = os.path.join(os.path.dirname(__file__), "..", "assets", "corredor-satelital.jpg")
 CAJA = os.path.join(os.path.dirname(__file__), "..", "assets", "corredor-caja.json")
-ALONG_MIN, ALONG_MAX = -120.0, 4100.0
-ANCHO = 340.0
+ALONG_MIN, ALONG_MAX = -250.0, 4250.0
+ANCHO = 450.0
 
 
 def ecef(lat, lon):

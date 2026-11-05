@@ -27,13 +27,14 @@ hay cuello de botella de CPU ni de GPU: el terreno son dos mallas (franja de
 
 | Pieza | Dónde | Origen |
 |---|---|---|
-| Ortofoto de la franja del corredor | `assets/corredor-satelital.jpg` | teselas Esri World Imagery z18 (`tools/bake_corredor.py`) |
-| Ortofoto amplia (municipios y veredas) | `assets/mapa-amplio.jpg` | teselas Esri z16 (`tools/bake_mapa.py`) |
+| Ortofoto de la franja del corredor | `assets/corredor-satelital.jpg` | teselas Esri World Imagery z19, 0,3 m/px (`tools/bake_corredor.py`) |
+| Ortofoto media (±4 km, z17) | `assets/mapa-medio.jpg` | teselas Esri z17 (`tools/bake_mapa.py --nivel 17 ...`) |
+| Ortofoto amplia (±8 km, z16) | `assets/mapa-amplio.jpg` | teselas Esri z16 (`tools/bake_mapa.py`) |
 | Relieve fino del corredor (25 m) | `assets/alturas-terreno.json` | SRTM 30 m vía OpenTopoData (`tools/bake_terreno.py`) |
-| Relieve amplio (±3 km, 50 m) | `assets/alturas-terreno-amplio.json` | ídem, área extendida |
+| Relieve amplio (±8 km, 50 m) | `assets/alturas-terreno-amplio.json` | ídem, área extendida |
 | Edificios OSM (718) | `assets/edificios.geojson` | OpenStreetMap |
 | Altura de suelo por edificio | `assets/alturas-edificios.json` | Cesium ion |
-| Dron (fuselaje + rotores animados) | `assets/corredor-dron.glb` | generado para el proyecto |
+| Dron (fuselaje + carga + gimbal + rotores) | `assets/corredor-dron.glb` | generado para el proyecto |
 | Capa de nubes del domo de cielo | `assets/nubes.png` | ruido de valor FBM (`tools/bake_nubes.py`) |
 | Icono de la ventana | `assets/icono.png` | generado con ImageMagick |
 
@@ -43,10 +44,12 @@ terreno: si se re-hornea una imagen hay que volver a generarlas.
 ## Re-horneado
 
 ```bash
-python3 tools/bake_terreno.py --paso 50 --margen-along 3000 --margen-lateral 5000 \
+python3 tools/bake_terreno.py --paso 50 --margen-along 8000 --margen-lateral 8000 \
         --salida alturas-terreno-amplio.json
-python3 tools/bake_mapa.py        # mosaico amplio + caja
-python3 tools/bake_corredor.py    # franja z18 + caja
+python3 tools/bake_mapa.py --nivel 17 --along-min -4000 --along-max 5000 --lateral 4000 \
+        --salida mapa-medio.jpg --caja mapa-medio-caja.json
+python3 tools/bake_mapa.py        # mosaico amplio (z16, ±8 km) + caja
+python3 tools/bake_corredor.py    # franja z19 + caja
 python3 tools/bake_nubes.py       # nubes del cielo (offline)
 ```
 
@@ -69,13 +72,29 @@ Esri World Imagery.
 - **Cámara**: persecución automática; arrastrar orbita libre alrededor del
   dron, la rueda hace zoom y `R` vuelve a seguirlo. Siempre con recorte por
   raycast contra los edificios.
+- **Terreno por capas**: franja (25 m, z19) sobre media (60 m, z17, ±4 km)
+  sobre amplia (100 m, z16, ±8 km); cada capa se hunde un poco para no pelear
+  por profundidad, y `agl()` nunca baja del DEM amplio.
 - **Ruta**: no es una regla: despegue, crucero con dos etapas de altitud
   (±8 m) y una curva S de ±20 m laterales, y descenso final. La ruta se pinta
   en escena (cinta de 1,8 m) y hay anillos pulsantes en UTS y UIS con haz
   vertical.
+- **Dron con vida**: la rotación del fuselaje se calcula cada frame con las
+  mismas convenciones que el cliente de referencia (euler XYZ sobre la base
+  -π/2/π): rumbo real, cabeceo proporcional a la velocidad y al ascenso,
+  alabeo en las curvas y vaiven de hover; los rotores giran a 4× el ciclo del
+  glTF (~25 rad/s).
 - **Texturas**: anisotropía 16 en el sampler por defecto; sin ella la
   ortofoto se ve en bloques al verla de canto.
 - **Iluminación**: sol direccional inclinado + relleno de ambiente. En Bevy
   0.16 el `AmbientLight` es un recurso (o componente de cámara), no una entidad.
 - **HUD**: egui (panel superior con estado y controles, panel inferior con
   telemetría y progreso del corredor).
+- **Modelo matemático**: panel lateral colapsable (`M` o botón `MODELO`) que
+  replica la sección de la versión web con los mismos datos en vivo:
+  `Ruta real` (distancia, rumbo, escala académica, destino académico, edificios
+  OSM que llegan a la franja de crucero, waypoints y desvío), `Matriz ENU`
+  (R 3×3 con det, rango y ker) y `Parámetros importantes` (los 11 temas de
+  álgebra del proyecto, con los valores de la telemetría). El módulo
+  `src/matematica.rs` es el port clean-room de `liveAlgebra` de la referencia,
+  con pruebas de paridad.

@@ -35,6 +35,7 @@ pub enum Fase {
 pub struct MuestraTelemetria {
     pub t: f64,
     pub posicion: Enu,
+    pub vel: Enu,
     pub rumbo_grados: f64,
     pub velocidad_total: f64,
     pub bateria_porcentaje: f64,
@@ -142,6 +143,7 @@ impl MotorVuelo {
         MuestraTelemetria {
             t: self.t,
             posicion: [self.pos[0], self.pos[1], altitud],
+            vel: [self.vel[0], self.vel[1], self.vel[2]],
             rumbo_grados: self.rumbog,
             velocidad_total,
             bateria_porcentaje: bateria,

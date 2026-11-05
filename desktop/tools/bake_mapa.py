@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""Hornea un mosaico satelital amplio del área de Bucaramanga.
+"""Hornea un mosaico satelital Esri en el marco del corredor.
 
-Usa las teselas públicas de Esri World Imagery (mismo origen que el bake del
-corredor) y recorta el rectángulo geodésico pedido.
+Por defecto: el área amplia (z16, ±8 km) → assets/mapa-amplio.jpg.
+Con --nivel/--along-*/--lateral/--salida/--caja se hornea cualquier capa
+(p. ej. la media a z17 para que no se vea pixelada a media distancia).
 
-Salida: desktop/assets/mapa-amplio.jpg
+Escribe además una caja geodésica (lon/lat min/max) para las UV en Rust.
 """
-import io
+import argparse
+import json
 import math
 import os
+import time
 import urllib.request
 from PIL import Image
 
-ANCLA_MSNM = 938.5
 LON_UTS, LAT_UTS = -73.123524, 7.1051164
 LON_UIS, LAT_UIS = -73.1198652, 7.1409311
-NIVEL = 16
 TILE = 256
-SALIDA = os.path.join(os.path.dirname(__file__), "..", "assets", "mapa-amplio.jpg")
-
-# Área en el marco del corredor: desde antes de la UTS hasta pasar la UIS.
-ALONG_MIN, ALONG_MAX = -3000.0, 7000.0
-LATERAL_MAX = 5000.0
+AQUI = os.path.join(os.path.dirname(__file__), "..", "assets")
 
 
 def ecef(lat, lon):
@@ -56,9 +53,9 @@ def px_xy(lat, lon, z):
 
 
 def descargar(url, destino):
-    if os.path.exists(destino):
+    if os.path.exists(destino) and os.path.getsize(destino) > 0:
         return
-    for intento in range(4):
+    for intento in range(5):
         try:
             urllib.request.urlretrieve(url, destino)
             return
@@ -68,26 +65,30 @@ def descargar(url, destino):
     raise RuntimeError(f"no se pudo descargar {url}")
 
 
-import time  # noqa: E402  (usado por descargar)
-
-
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--nivel", type=int, default=16)
+    ap.add_argument("--along-min", type=float, default=-8000.0)
+    ap.add_argument("--along-max", type=float, default=9000.0)
+    ap.add_argument("--lateral", type=float, default=8000.0)
+    ap.add_argument("--salida", default="mapa-amplio.jpg")
+    ap.add_argument("--caja", default="mapa-amplio-caja.json")
+    args = ap.parse_args()
+
     largo = math.dist(enu_de(LAT_UIS, LON_UIS), (0.0, 0.0))
     dir_ = [v / largo for v in enu_de(LAT_UIS, LON_UIS)]
     lado = [-dir_[1], dir_[0]]
 
-    def enu(along, lateral):
-        return (dir_[0] * along + lado[0] * lateral, dir_[1] * along + lado[1] * lateral)
-
     def a_lonlat(along, lateral):
-        este, norte = enu(along, lateral)
+        este = dir_[0] * along + lado[0] * lateral
+        norte = dir_[1] * along + lado[1] * lateral
         return (LAT_UTS + norte / 111320.0, LON_UTS + este / (111320.0 * math.cos(math.radians(LAT_UTS))))
 
     esquinas = [
-        a_lonlat(ALONG_MIN, -LATERAL_MAX),
-        a_lonlat(ALONG_MIN, LATERAL_MAX),
-        a_lonlat(ALONG_MAX, -LATERAL_MAX),
-        a_lonlat(ALONG_MAX, LATERAL_MAX),
+        a_lonlat(args.along_min, -args.lateral),
+        a_lonlat(args.along_min, args.lateral),
+        a_lonlat(args.along_max, -args.lateral),
+        a_lonlat(args.along_max, args.lateral),
     ]
     lat_min = min(c[0] for c in esquinas)
     lat_max = max(c[0] for c in esquinas)
@@ -95,8 +96,8 @@ def main():
     lon_max = max(c[1] for c in esquinas)
     print(f"bbox lat {lat_min:.5f}..{lat_max:.5f}  lon {lon_min:.5f}..{lon_max:.5f}")
 
-    x0, y0 = tile_xy(lat_max, lon_min, NIVEL)
-    x1, y1 = tile_xy(lat_min, lon_max, NIVEL)
+    x0, y0 = tile_xy(lat_max, lon_min, args.nivel)
+    x1, y1 = tile_xy(lat_min, lon_max, args.nivel)
     print(f"teselas {x0}..{x1} x {y0}..{y1}  ({(x1 - x0 + 1) * (y1 - y0 + 1)} descargas)")
 
     ancho = (x1 - x0 + 1) * TILE
@@ -104,24 +105,27 @@ def main():
     mosaico = Image.new("RGB", (ancho, alto))
     for x in range(x0, x1 + 1):
         for y in range(y0, y1 + 1):
-            ruta = f"/tmp/opencode/esri_{NIVEL}_{x}_{y}.jpg"
-            descargar(f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{NIVEL}/{y}/{x}", ruta)
+            ruta = f"/tmp/opencode/esri_{args.nivel}_{x}_{y}.jpg"
+            descargar(
+                f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{args.nivel}/{y}/{x}",
+                ruta,
+            )
             mosaico.paste(Image.open(ruta).convert("RGB"), ((x - x0) * TILE, (y - y0) * TILE))
-        print(f"  columna {x} lista")
+        print(f"  columna {x} lista", flush=True)
 
-    px0, py0 = px_xy(lat_max, lon_min, NIVEL)
-    px1, py1 = px_xy(lat_min, lon_max, NIVEL)
+    px0, py0 = px_xy(lat_max, lon_min, args.nivel)
+    px1, py1 = px_xy(lat_min, lon_max, args.nivel)
     recorte = mosaico.crop((int(px0 - x0 * TILE), int(py0 - y0 * TILE), int(px1 - x0 * TILE), int(py1 - y0 * TILE)))
-    ruta_salida = os.path.abspath(SALIDA)
+    ruta_salida = os.path.abspath(os.path.join(AQUI, args.salida))
     recorte.save(ruta_salida, quality=86, optimize=True)
     print(f"escrito {ruta_salida}  {recorte.size}  {os.path.getsize(ruta_salida) // 1024} KB")
-
-    # Caja del recorte en lon/lat, para las UV en Rust.
-    with open(os.path.join(os.path.dirname(SALIDA), "mapa-amplio-caja.json"), "w") as f:
-        json.dump({"lon_min": lon_min, "lon_max": lon_max, "lat_min": lat_min, "lat_max": lat_max,
-                   "nivel": NIVEL}, f, indent=2)
+    with open(os.path.abspath(os.path.join(AQUI, args.caja)), "w") as f:
+        json.dump(
+            {"lon_min": lon_min, "lon_max": lon_max, "lat_min": lat_min, "lat_max": lat_max, "nivel": args.nivel},
+            f,
+            indent=2,
+        )
 
 
 if __name__ == "__main__":
-    import json  # noqa: E402
     main()

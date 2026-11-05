@@ -15,17 +15,20 @@ use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
 use parry3d_f64::shape::TriMesh;
 
-use crate::nucleo::{MotorVuelo, ALTITUD_CRUCERO, ALTURA_ANCLA_MSNM};
+use crate::nucleo::{Fase, MotorVuelo, VERTICAL_MS, ALTITUD_CRUCERO, ALTURA_ANCLA_MSNM};
 
-const LON_UTS: f64 = -73.123524;
-const LAT_UTS: f64 = 7.1051164;
+pub(crate) const LON_UTS: f64 = -73.123524;
+pub(crate) const LAT_UTS: f64 = 7.1051164;
 const LON_UIS: f64 = -73.1198652;
 const LAT_UIS: f64 = 7.1409311;
 const MG_LAT: f64 = 111_320.0;
 const PASO_MALLA: f64 = 25.0;
 const PASO_FONDO: f64 = 100.0;
 const MARGEN_BBOX: f64 = 0.009;
-const ANCHO_LATERAL: f64 = 300.0;
+const PASO_MEDIO: f64 = 60.0;
+const MEDIO_ALONG_MIN: f64 = -4000.0;
+const MEDIO_ALONG_MAX: f64 = 5000.0;
+const MEDIO_LATERAL: f64 = 4000.0;
 
 pub struct EscenaPlugin;
 
@@ -48,7 +51,14 @@ impl Plugin for EscenaPlugin {
             .add_systems(FixedUpdate, avanzar_vuelo)
             .add_systems(
                 Update,
-                (entrada_camara, seguir_dron, animar_rotores, pulso_marcas, poner_icono),
+                (
+                    entrada_camara,
+                    seguir_dron,
+                    animar_dron,
+                    animar_rotores,
+                    pulso_marcas,
+                    poner_icono,
+                ),
             );
     }
 }
@@ -139,6 +149,7 @@ pub struct Corredor {
     pub largo: f64,
     pub desplazamiento: [f64; 2],
     bbox_franja: [f64; 4],
+    bbox_medio: [f64; 4],
     bbox_fondo: [f64; 4],
     mg_lon: f64,
 }
@@ -196,6 +207,7 @@ impl Corredor {
             let lat_max = LAT_UTS.max(LAT_UIS) + MARGEN_BBOX;
             Self::bbox_mercator(lon_min, lon_max, lat_min, lat_max)
         });
+        let bbox_medio = Self::cargar_caja("assets/mapa-medio-caja.json").unwrap_or(bbox_franja);
         let bbox_fondo = Self::cargar_caja("assets/mapa-amplio-caja.json").unwrap_or(bbox_franja);
 
         Corredor {
@@ -206,6 +218,7 @@ impl Corredor {
             largo,
             desplazamiento,
             bbox_franja,
+            bbox_medio,
             bbox_fondo,
             mg_lon: MG_LAT * LAT_UTS.to_radians().cos(),
         }
@@ -305,15 +318,30 @@ impl Corredor {
     /// Altura relativa al ancla (m) del terreno bajo un punto ENU.
     /// Mezcla el DEM fino del corredor con el amplio de los alrededores.
     pub fn agl(&self, este: f64, norte: f64) -> f64 {
-        let along = este * self.dir[0] + norte * self.dir[1];
-        let lateral = este * self.lado[0] + norte * self.lado[1];
+        let (along, lateral) = self.proyectar(este, norte);
         let fino = self.terreno.altura(along, lateral);
         let peso = self.peso_fino(along, lateral);
-        if peso >= 1.0 {
+        let mix = if peso >= 1.0 {
             fino
         } else {
             fino * peso + self.fondo.altura(along, lateral) * (1.0 - peso)
-        }
+        };
+        // Nunca bajo el DEM amplio: asi las capas de malla no se cruzan.
+        mix.max(self.fondo.altura(along, lateral))
+    }
+
+    /// (along, lateral) del punto ENU en el marco de la ruta.
+    pub fn proyectar(&self, este: f64, norte: f64) -> (f64, f64) {
+        (
+            este * self.dir[0] + norte * self.dir[1],
+            este * self.lado[0] + norte * self.lado[1],
+        )
+    }
+
+    /// Altura del DEM amplio en bruto (para hundir las capas medias).
+    pub fn dem(&self, este: f64, norte: f64) -> f64 {
+        let (along, lateral) = self.proyectar(este, norte);
+        self.fondo.altura(along, lateral)
     }
 
     /// Rango del DEM amplio: (along_min, along_max, lateral_min, lateral_max).
@@ -467,9 +495,40 @@ fn construir_escena(
         })),
     ));
 
-    if std::path::Path::new("assets/mapa-amplio.jpg").exists() {
+    // Capa media (z17): sin ella, a media distancia la ortofoto se ve en bloques.
+    if std::path::Path::new("assets/mapa-medio.jpg").exists() {
         commands.spawn((
-            Mesh3d(mallas.add(malla_fondo(&corredor))),
+            Mesh3d(mallas.add(malla_relieve(
+                &corredor,
+                MEDIO_ALONG_MIN,
+                MEDIO_ALONG_MAX,
+                -MEDIO_LATERAL,
+                MEDIO_LATERAL,
+                PASO_MEDIO,
+                &corredor.bbox_medio,
+                0.4,
+            ))),
+            MeshMaterial3d(materiales.add(StandardMaterial {
+                base_color_texture: Some(server.load("mapa-medio.jpg")),
+                perceptual_roughness: 0.95,
+                cull_mode: None,
+                ..default()
+            })),
+        ));
+    }
+    if std::path::Path::new("assets/mapa-amplio.jpg").exists() {
+        let (along_min, along_max, lateral_min, lateral_max) = corredor.rango_fondo();
+        commands.spawn((
+            Mesh3d(mallas.add(malla_relieve(
+                &corredor,
+                along_min,
+                along_max,
+                lateral_min,
+                lateral_max,
+                PASO_FONDO,
+                &corredor.bbox_fondo,
+                1.0,
+            ))),
             MeshMaterial3d(materiales.add(StandardMaterial {
                 base_color_texture: Some(server.load("mapa-amplio.jpg")),
                 perceptual_roughness: 0.95,
@@ -498,15 +557,8 @@ fn construir_escena(
     commands
         .spawn((Dron, Transform::default(), Visibility::default()))
         .with_children(|padre| {
-            padre.spawn((
-                SceneRoot(escena),
-                Transform::from_scale(Vec3::splat(3.0)).with_rotation(Quat::from_euler(
-                    EulerRot::XYZ,
-                    -std::f32::consts::FRAC_PI_2,
-                    std::f32::consts::PI,
-                    0.0,
-                )),
-            ));
+            // La rotacion base + actitud dinamica vive en el nodo padre.
+            padre.spawn((SceneRoot(escena), Transform::from_scale(Vec3::splat(3.0))));
         });
 
     // Ruta pintada en escena: el piloto ve el trazado que sigue el dron.
@@ -707,14 +759,17 @@ fn vista_amplia(corredor: &Corredor) -> (Vec3, Vec3) {
 fn malla_terreno(corredor: &Corredor) -> Mesh {
     // Malla densa (25 m) para que el relieve del DEM se note, con normales
     // calculadas: sin ellas la iluminación no tiene contra qué sombrear.
-    let filas = (corredor.largo / PASO_MALLA).round().max(8.0) as usize;
-    let cols = (2.0 * ANCHO_LATERAL / PASO_MALLA).round().max(4.0) as usize;
+    // Cubre todo el DEM fino; su borde cae justo al valor del DEM amplio.
+    let (along_min, along_max) = (corredor.terreno.along_min, corredor.terreno.along_max());
+    let (lat_min, lat_max) = (corredor.terreno.lateral_min, corredor.terreno.lateral_max());
+    let filas = ((along_max - along_min) / PASO_MALLA).round().max(8.0) as usize;
+    let cols = ((lat_max - lat_min) / PASO_MALLA).round().max(4.0) as usize;
     let mut posiciones = Vec::with_capacity((filas + 1) * (cols + 1));
     let mut uvs = Vec::with_capacity((filas + 1) * (cols + 1));
     for fila in 0..=filas {
-        let along = corredor.largo * fila as f64 / filas as f64;
+        let along = along_min + (along_max - along_min) * fila as f64 / filas as f64;
         for col in 0..=cols {
-            let lateral = -ANCHO_LATERAL + 2.0 * ANCHO_LATERAL * col as f64 / cols as f64;
+            let lateral = lat_min + (lat_max - lat_min) * col as f64 / cols as f64;
             let [este, norte] = corredor.punto(along, lateral);
             posiciones.push([este as f32, corredor.agl(este, norte) as f32, norte as f32]);
             uvs.push(corredor.uv(este, norte, &corredor.bbox_franja));
@@ -747,10 +802,22 @@ fn malla_terreno(corredor: &Corredor) -> Mesh {
 }
 
 /** Terreno amplio: monta y veredas alrededor del corredor. */
-fn malla_fondo(corredor: &Corredor) -> Mesh {
-    let (along_min, along_max, lateral_min, lateral_max) = corredor.rango_fondo();
-    let filas = ((along_max - along_min) / PASO_FONDO).round().max(4.0) as usize;
-    let cols = ((lateral_max - lateral_min) / PASO_FONDO).round().max(4.0) as usize;
+/**
+ * Terreno intermedio/lejano sobre el DEM amplio, hundido `hundido` metros
+ * para no pelear por profundidad con la capa de arriba.
+ */
+fn malla_relieve(
+    corredor: &Corredor,
+    along_min: f64,
+    along_max: f64,
+    lateral_min: f64,
+    lateral_max: f64,
+    paso: f64,
+    bbox: &[f64; 4],
+    hundido: f32,
+) -> Mesh {
+    let filas = ((along_max - along_min) / paso).round().max(4.0) as usize;
+    let cols = ((lateral_max - lateral_min) / paso).round().max(4.0) as usize;
     let mut posiciones = Vec::with_capacity((filas + 1) * (cols + 1));
     let mut uvs = Vec::with_capacity((filas + 1) * (cols + 1));
     for fila in 0..=filas {
@@ -758,13 +825,12 @@ fn malla_fondo(corredor: &Corredor) -> Mesh {
         for col in 0..=cols {
             let lateral = lateral_min + (lateral_max - lateral_min) * col as f64 / cols as f64;
             let [este, norte] = corredor.punto(along, lateral);
-            // Un centimetro bajo la franja para que no pelen por la profundidad.
             posiciones.push([
                 este as f32,
-                corredor.agl(este, norte) as f32 - 0.6,
+                corredor.dem(este, norte) as f32 - hundido,
                 norte as f32,
             ]);
-            uvs.push(corredor.uv(este, norte, &corredor.bbox_fondo));
+            uvs.push(corredor.uv(este, norte, bbox));
         }
     }
     let ancho = cols + 1;
@@ -851,6 +917,52 @@ impl Acumulador {
         self.triangulo(ids[0], ids[1], ids[2]);
         self.colision_indices.push([inicio, inicio + 1, inicio + 2]);
     }
+}
+
+/// (total de edificios OSM, los que llegan a la franja de crucero).
+/// Mismo criterio que la planificación de referencia: techo sobre
+/// ALTITUD_CRUCERO - 12 m, medido desde el ancla.
+pub fn contar_edificios(corredor: &Corredor) -> (u32, u32) {
+    let texto = std::fs::read_to_string("assets/edificios.geojson").unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_str(&texto).unwrap_or_default();
+    let umbral = ALTITUD_CRUCERO - 12.0;
+    let mut total = 0u32;
+    let mut bloquean = 0u32;
+    for feature in json["features"].as_array().into_iter().flatten() {
+        if feature["geometry"]["type"] != "Polygon" {
+            continue;
+        }
+        let anillo = feature["geometry"]["coordinates"][0]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if anillo.len() < 4 {
+            continue;
+        }
+        let plano: Vec<[f64; 2]> = anillo
+            .iter()
+            .map(|p| enu_de(p[1].as_f64().unwrap_or(0.0), p[0].as_f64().unwrap_or(0.0)))
+            .collect();
+        let centro = [
+            plano.iter().map(|p| p[0]).sum::<f64>() / plano.len() as f64,
+            plano.iter().map(|p| p[1]).sum::<f64>() / plano.len() as f64,
+        ];
+        let alto = feature["properties"]["height"]
+            .as_f64()
+            .filter(|h| *h > 1.0)
+            .or_else(|| {
+                feature["properties"]["levels"]
+                    .as_f64()
+                    .filter(|n| *n > 0.0)
+                    .map(|n| n * 3.2 + 1.5)
+            })
+            .unwrap_or(9.0);
+        total += 1;
+        if corredor.agl(centro[0], centro[1]) + alto >= umbral {
+            bloquean += 1;
+        }
+    }
+    (total, bloquean)
 }
 
 fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
@@ -1101,12 +1213,54 @@ fn golpe_de(malla: &Option<TriMesh>, desde: Vec3, objetivo: Vec3) -> Option<f64>
     malla.cast_ray(&Isometry::identity(), &rayo, distancia as f64, true)
 }
 
+/**
+ * Actitud del fuselaje: rumbo, cabeceo por velocidad y ascenso, alabeo en
+ * las curvas y vaiven de hover. Mismas convenciones que el cliente de
+ * referencia (euler XYZ, base -pi/2 / pi).
+ */
+fn animar_dron(
+    tiempo: Res<Time>,
+    vuelo: Res<Vuelo>,
+    mut drones: Query<&mut Transform, With<Dron>>,
+    mut estado: Local<(f32, f32, f32)>,
+) {
+    let m = vuelo.motor.telemetria();
+    let rumbo = m.rumbo_grados.to_radians();
+    let vel_h = (m.vel[0].powi(2) + m.vel[1].powi(2)).sqrt();
+    let vel_z = m.vel[2];
+    // Velocidad lateral respecto al rumbo (izquierda positiva): alabeo.
+    let v_lat = m.vel[0] * rumbo.cos() - m.vel[1] * rumbo.sin();
+    // Cabeceo: morro abajo con velocidad (referencia) + leve morro arriba al
+    // ascender y abajo al descender.
+    let objetivo_pitch = -(vel_h * 0.009).min(0.2)
+        + (vel_z / VERTICAL_MS).clamp(-1.0, 1.0) * 0.15;
+    let objetivo_roll = (v_lat * 0.35).clamp(-0.30, 0.30);
+    let en_aire = matches!(m.fase, Fase::Despegue | Fase::Crucero | Fase::Descenso);
+    let mezcla = (1.0 - (-6.0 * tiempo.delta_secs_f64()).exp()) as f32;
+    let (mut pitch_f, mut roll_f, mut amp) = *estado;
+    pitch_f += (objetivo_pitch as f32 - pitch_f) * mezcla;
+    roll_f += (objetivo_roll as f32 - roll_f) * mezcla;
+    amp += ((if en_aire { 1.0 } else { 0.0 }) - amp) * mezcla;
+    *estado = (pitch_f, roll_f, amp);
+    let t = tiempo.elapsed_secs();
+    let vaiven = amp * (0.12 * (1.8 * t).sin() + 0.07 * (2.9 * t + 1.3).sin());
+    for mut tras in &mut drones {
+        tras.translation.y += vaiven as f32;
+        tras.rotation = Quat::from_euler(
+            EulerRot::XYZ,
+            -std::f32::consts::FRAC_PI_2 + pitch_f,
+            std::f32::consts::PI + rumbo as f32,
+            roll_f,
+        );
+    }
+}
+
 fn animar_rotores(mut jugadores: Query<&mut AnimationPlayer>, mut iniciado: Local<bool>) {
     if *iniciado {
         return;
     }
     if let Some(mut jugador) = jugadores.iter_mut().next() {
-        jugador.play(AnimationNodeIndex::new(0)).repeat();
+        jugador.play(AnimationNodeIndex::new(0)).repeat().set_speed(4.0);
         *iniciado = true;
     }
 }
