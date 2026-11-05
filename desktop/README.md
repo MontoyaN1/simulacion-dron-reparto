@@ -13,8 +13,9 @@ cargo run --release      # la app
 Requiere el directorio `assets/` junto al binario (en `cargo run` se resuelve
 solo; para empaquetar, copiar `assets/` a la carpeta del ejecutable).
 
-Con `CAPTURA=1` se guardan tres fotogramas del vuelo en `capturas/`
-(presentación, despegue y crucero) para revisar la escena sin tocar nada.
+Con `CAPTURA=1` se guardan cuatro fotogramas del vuelo en `capturas/`
+(presentación, despegue, crucero y acercamiento a la UIS) para revisar la
+escena sin tocar nada.
 
 ## Rendimiento
 
@@ -66,6 +67,12 @@ Esri World Imagery.
 - **Temblor**: el motor de vuelo avanza a paso fijo de 30 Hz y el render
   interpola entre el paso anterior y el actual, así que la imagen nunca da
   tirones aunque el cuadro no cuadre con los 30 Hz.
+- **Edificios**: los 718 son una sola malla (1 draw call) con fachada
+  procedural —textura de muro y ventanas generada al arrancar con su cadena de
+  mipmaps, UV en metros— y techos más oscuros. Los campus llevan landmarks:
+  la torre ocre escalonada de Ciencias Humanas 2, el planetario (tambor +
+  cúpula), la casona de teja a dos aguas y la biblioteca en ladrillo en la
+  UIS; bloques institucionales y torres con corona azul en la UTS.
 - **Cielo**: `Atmosphere` (Bruneton) sobre la cámara con `hdr: true` (en 0.16
   el campo vive en la componente base `Camera`); el sol lo toma de la
   `DirectionalLight` y una cúpula de 20 km con `nubes.png` aporta las nubes.
@@ -79,6 +86,13 @@ Esri World Imagery.
   (±8 m) y una curva S de ±20 m laterales, y descenso final. La ruta se pinta
   en escena (cinta de 1,8 m) y hay anillos pulsantes en UTS y UIS con haz
   vertical.
+- **Sentido reversible**: botón `Sentido: …` en la barra superior (o tecla
+  `T`) voltea la ruta en caliente: reconstruye el vuelo desde el nuevo origen,
+  repinta la cinta, intercambia colores de anillos (azul = origen, verde =
+  llegada) y el panel matemático recalcula solo lo direccional (rumbo ≈ +180°,
+  destino académico ≈ (0,0) —el marco ENU académico sigue con origen en la
+  UTS—, dirección y distancia). El motor, las fases, la telemetría, la
+  colisión y la cámara son agnósticos al sentido.
 - **Dron con vida**: la rotación del fuselaje se calcula cada frame con las
   mismas convenciones que el cliente de referencia (euler XYZ sobre la base
   -π/2/π): rumbo real, cabeceo proporcional a la velocidad y al ascenso,

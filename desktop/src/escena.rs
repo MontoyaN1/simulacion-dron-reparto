@@ -7,10 +7,12 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::pbr::Atmosphere;
 use bevy::prelude::*;
 use bevy::render::alpha::AlphaMode;
-use bevy::render::mesh::{Indices, PrimitiveTopology};
+use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::Face;
-use bevy::window::PrimaryWindow;
+use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::EguiContexts;
 use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
@@ -36,7 +38,7 @@ pub struct EscenaPlugin;
 impl Plugin for EscenaPlugin {
     fn build(&self, app: &mut App) {
         let corredor = Corredor::cargar();
-        let ruta = perfil_ruta(&corredor);
+        let ruta = perfil_ruta(&corredor, false);
         // Relleno de cielo: sin él las caras a contraluz quedan en negro puro.
         // En Bevy 0.16 el ambiente es un recurso (o componente de cámara).
         app.insert_resource(AmbientLight {
@@ -44,6 +46,8 @@ impl Plugin for EscenaPlugin {
             brightness: 2_500.0,
             affects_lightmapped_meshes: false,
         })
+        .insert_resource(Sentido::default())
+        .init_resource::<Zonas>()
         .insert_resource(Vuelo::nuevo(ruta))
             .insert_resource(corredor)
             .init_resource::<ColisionEdificios>()
@@ -54,6 +58,7 @@ impl Plugin for EscenaPlugin {
             .add_systems(
                 Update,
                 (
+                    aplicar_sentido,
                     entrada_camara,
                     seguir_dron,
                     animar_dron,
@@ -65,18 +70,52 @@ impl Plugin for EscenaPlugin {
     }
 }
 
-/** Ruta UTS->UIS con etapas verticales y un leve giro S. */
-fn perfil_ruta(corredor: &Corredor) -> Vec<[f64; 3]> {
+/// Sentido del recorrido. El marco académico ENU sigue con origen en la UTS.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sentido {
+    #[default]
+    UtsAUis,
+    UisAuts,
+}
+
+impl Sentido {
+    pub fn invertir(self) -> Self {
+        match self {
+            Sentido::UtsAUis => Sentido::UisAuts,
+            Sentido::UisAuts => Sentido::UtsAUis,
+        }
+    }
+
+    pub fn nombre(self) -> &'static str {
+        match self {
+            Sentido::UtsAUis => "UTS → UIS",
+            Sentido::UisAuts => "UIS → UTS",
+        }
+    }
+}
+
+/** Ruta según el sentido: UTS→UIS (`invertida=false`) o UIS→UTS (`invertida=true`).
+ * Las etapas son los mismos puntos geométricos (mismo `along` absoluto, luego la
+ * curva S y las etapas de ±8 m son idénticas), emitidos en orden inverso; los
+ * extremos se intercambian y el perfil vertical se voltea (despegue vertical en
+ * el nuevo origen, descenso vertical al nuevo destino). */
+fn perfil_ruta(corredor: &Corredor, invertida: bool) -> Vec<[f64; 3]> {
     let [dx, dn] = corredor.desplazamiento;
-    let suelo_uts = corredor.agl(0.0, 0.0);
-    let suelo_uis = corredor.agl(dx, dn);
+    let (origen, destino) = if invertida {
+        ([dx, dn], [0.0, 0.0])
+    } else {
+        ([0.0, 0.0], [dx, dn])
+    };
+    let suelo_origen = corredor.agl(origen[0], origen[1]);
+    let suelo_destino = corredor.agl(destino[0], destino[1]);
     let mut ruta = vec![
-        [0.0, 0.0, suelo_uts],
-        [0.0, 0.0, suelo_uts + ALTITUD_CRUCERO],
+        [origen[0], origen[1], suelo_origen],
+        [origen[0], origen[1], suelo_origen + ALTITUD_CRUCERO],
     ];
     let etapas = 14;
     for k in 1..=etapas {
-        let along = corredor.largo * k as f64 / etapas as f64;
+        let t = k as f64 / etapas as f64;
+        let along = corredor.largo * if invertida { 1.0 - t } else { t };
         // Curva S suave: hasta ±20 m laterales, cero en los extremos.
         let lateral = 20.0 * (std::f64::consts::TAU * along / corredor.largo).sin();
         // Crucero a 50 m con dos etapas de altitud (±8 m) a lo largo.
@@ -84,7 +123,7 @@ fn perfil_ruta(corredor: &Corredor) -> Vec<[f64; 3]> {
         let [este, norte] = corredor.punto(along, lateral);
         ruta.push([este, norte, corredor.agl(este, norte) + alt]);
     }
-    ruta.push([dx, dn, suelo_uis]);
+    ruta.push([destino[0], destino[1], suelo_destino]);
     ruta
 }
 
@@ -210,7 +249,7 @@ impl MallaAltura {
 }
 
 impl Corredor {
-    fn cargar() -> Self {
+    pub fn cargar() -> Self {
         let terreno = Self::cargar_terreno("assets/alturas-terreno.json");
         // El área amplia (municipios y veredas) es opcional: si no está, el
         // fondo usa la misma rejilla del corredor.
@@ -492,9 +531,60 @@ fn pulso_marcas(tiempo: Res<Time>, mut zonas: Query<&mut Transform, With<ZonaMar
     }
 }
 
+/// Voltea la ruta en caliente: reconstruye el vuelo desde el nuevo origen,
+/// re-inserta la malla de la cinta, intercambia los colores de las zonas
+/// (azul = origen, verde = destino) y actualiza el título de la ventana.
+/// Se ejecuta una sola vez por cambio de sentido (Local como memo del último
+/// estado aplicado). El motor, las fases, la telemetría, la colisión y la
+/// cámara son agnósticos al sentido: solo consumen la polilínea.
+fn aplicar_sentido(
+    mut visto: Local<Option<Sentido>>,
+    sentido: Res<Sentido>,
+    mut vuelo: ResMut<Vuelo>,
+    corredor: Res<Corredor>,
+    mut mallas: ResMut<Assets<Mesh>>,
+    mut materiales: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+    cintas: Query<Entity, With<CintaRuta>>,
+    zonas: Res<Zonas>,
+    mut ventanas: Query<&mut Window>,
+) {
+    if *visto == Some(*sentido) {
+        return;
+    }
+    let invertida = *sentido == Sentido::UisAuts;
+    let ruta = perfil_ruta(&corredor, invertida);
+    *vuelo = Vuelo::nuevo(ruta.clone());
+    println!(
+        "Sentido: {} · vuelo reiniciado en ({:.0}, {:.0})",
+        sentido.nombre(),
+        vuelo.motor.telemetria().posicion[0],
+        vuelo.motor.telemetria().posicion[1],
+    );
+    if let Ok(cinta) = cintas.single() {
+        commands.entity(cinta).insert(Mesh3d(mallas.add(cinta_ruta(&ruta))));
+    }
+    // Azul siempre marca el origen; al invertir, UIS pasa a ser el origen.
+    let (azul, verde) = (color_origen(), color_destino());
+    let (uts, uis) = if invertida { (verde, azul) } else { (azul, verde) };
+    if let Some((anillo, haz)) = zonas.uts {
+        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.55)));
+        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.22)));
+    }
+    if let Some((anillo, haz)) = zonas.uis {
+        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.55)));
+        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.22)));
+    }
+    if let Ok(mut ventana) = ventanas.single_mut() {
+        ventana.title = format!("Dron {} · Estación de control", sentido.nombre());
+    }
+    *visto = Some(*sentido);
+}
+
 fn construir_escena(
     mut commands: Commands,
     mut mallas: ResMut<Assets<Mesh>>,
+    mut imagenes: ResMut<Assets<Image>>,
     mut materiales: ResMut<Assets<StandardMaterial>>,
     server: Res<AssetServer>,
     corredor: Res<Corredor>,
@@ -568,11 +658,13 @@ fn construir_escena(
     let (malla, trimesh) = malla_edificios(&corredor);
     colision.0 = trimesh;
     if let Some(malla) = malla {
+        let fachada = imagenes.add(textura_fachada());
         commands.spawn((
             Mesh3d(mallas.add(malla)),
             MeshMaterial3d(materiales.add(StandardMaterial {
                 base_color: Color::WHITE,
-                perceptual_roughness: 0.95,
+                base_color_texture: Some(fachada),
+                perceptual_roughness: 0.9,
                 cull_mode: None,
                 ..default()
             })),
@@ -590,6 +682,7 @@ fn construir_escena(
 
     // Ruta pintada en escena: el piloto ve el trazado que sigue el dron.
     commands.spawn((
+        CintaRuta,
         Mesh3d(mallas.add(cinta_ruta(&vuelo.ruta))),
         MeshMaterial3d(materiales.add(StandardMaterial {
             unlit: true,
@@ -601,8 +694,10 @@ fn construir_escena(
     ));
 
     // Anillos de salida (UTS) y llegada (UIS) con su haz vertical.
-    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], Color::srgb(0.35, 0.83, 1.0));
-    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, Color::srgb(0.5, 0.9, 0.6));
+    // Azul = origen del vuelo, verde = destino (aplicar_sentido los intercambia).
+    let uts = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], color_origen());
+    let uis = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, color_destino());
+    commands.insert_resource(Zonas { uts: Some(uts), uis: Some(uis) });
 
     // Capa de nubes: domo gigante a 20 km con textura horneada.
     if std::path::Path::new("assets/nubes.png").exists() {
@@ -636,7 +731,8 @@ fn construir_escena(
     commands.insert_resource(Camara { pos: vista, ..default() });
 }
 
-/** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m. */
+/** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m.
+ * Devuelve (anillo, haz) para poder intercambiar colores según el sentido. */
 fn spawn_zona(
     commands: &mut Commands,
     mallas: &mut Assets<Mesh>,
@@ -644,32 +740,20 @@ fn spawn_zona(
     corredor: &Corredor,
     pos_enu: [f64; 2],
     color: Color,
-) {
-    let c = color.to_srgba();
+) -> (Entity, Entity) {
     let suelo = corredor.agl(pos_enu[0], pos_enu[1]) as f32;
     let centro = Vec3::new(pos_enu[0] as f32, suelo + 0.3, pos_enu[1] as f32);
-    commands.spawn((
+    let anillo = commands.spawn((
         ZonaMarcada,
         Mesh3d(mallas.add(anillo(7.0, 11.0, 48))),
-        MeshMaterial3d(materiales.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::srgba(c.red, c.green, c.blue, 0.55),
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            ..default()
-        })),
+        MeshMaterial3d(material_zona(materiales, color, 0.55)),
         Transform::from_translation(centro),
-    ));
-    commands.spawn((
+    )).id();
+    let haz = commands.spawn((
         Mesh3d(mallas.add(haz_luz(centro, 90.0))),
-        MeshMaterial3d(materiales.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::srgba(c.red, c.green, c.blue, 0.22),
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            ..default()
-        })),
-    ));
+        MeshMaterial3d(material_zona(materiales, color, 0.22)),
+    )).id();
+    (anillo, haz)
 }
 
 /** Cinta de 1,8 m de ancho sobre la ruta, para verla de lejos. */
@@ -774,6 +858,39 @@ fn domo_nubes(radio: f32, sectores: u32, capas: u32) -> Mesh {
 
 #[derive(Component)]
 struct ZonaMarcada;
+
+/// Marcador de la malla de la cinta de ruta, para re-insertarla al voltear el sentido.
+#[derive(Component)]
+struct CintaRuta;
+
+/// Anillo y haz de cada campus, para intercambiar sus colores según el sentido.
+#[derive(Resource, Default)]
+struct Zonas {
+    uts: Option<(Entity, Entity)>,
+    uis: Option<(Entity, Entity)>,
+}
+
+/// Azul: siempre marca el origen del vuelo.
+fn color_origen() -> Color {
+    Color::srgb(0.35, 0.83, 1.0)
+}
+
+/// Verde: siempre marca el destino del vuelo.
+fn color_destino() -> Color {
+    Color::srgb(0.5, 0.9, 0.6)
+}
+
+/// Material de zona: anillo (alfa 0.55) o haz vertical (alfa 0.22).
+fn material_zona(materiales: &mut Assets<StandardMaterial>, color: Color, alfa: f32) -> Handle<StandardMaterial> {
+    let c = color.to_srgba();
+    materiales.add(StandardMaterial {
+        unlit: true,
+        base_color: Color::srgba(c.red, c.green, c.blue, alfa),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    })
+}
 
 /// Plano de presentación: el corredor en perspectiva, desde atrás y a la izquierda.
 fn vista_amplia(corredor: &Corredor) -> (Vec3, Vec3) {
@@ -900,10 +1017,28 @@ const TINTES: [[f32; 3]; 6] = [
 ];
 const BASE: [f32; 3] = [0.702, 0.667, 0.620];
 
+/// Altura de piso para el ritmo de ventanas de la fachada (metros).
+const PISO_M: f32 = 3.3;
+/// UV que cae en muro liso de la textura de fachada (techos y cúpulas).
+const UV_MURO: [f32; 2] = [0.15, 0.5];
+
+// Paleta institucional de los campus (sRGB).
+const SRGB_OCRE: [f32; 3] = [0.78, 0.58, 0.36]; // Ciencias Humanas: concreto ocre
+const SRGB_GRIS: [f32; 3] = [0.55, 0.56, 0.58]; // núcleos y cajas de azotea
+const SRGB_LADRILLO: [f32; 3] = [0.64, 0.46, 0.36]; // Biblioteca (patrimonio)
+const SRGB_INSTITUCIONAL: [f32; 3] = [0.78, 0.79, 0.81]; // bloques de la UIS
+const SRGB_CREMA: [f32; 3] = [0.84, 0.80, 0.72]; // Casona La Perla
+const SRGB_TERRACOTA: [f32; 3] = [0.60, 0.34, 0.24]; // teja de la casona
+const SRGB_CAMPUS_UTS: [f32; 3] = [0.75, 0.76, 0.79]; // bloques del campus UTS
+const SRGB_CORONA_UTS: [f32; 3] = [0.30, 0.48, 0.72]; // corona de las torres UTS
+const SRGB_CUPULA: [f32; 3] = [0.60, 0.63, 0.68]; // cúpula del planetario
+const SRGB_CILINDRO: [f32; 3] = [0.85, 0.85, 0.87]; // tambor del planetario
+
 struct Acumulador {
     posiciones: Vec<[f32; 3]>,
     normales: Vec<[f32; 3]>,
     colores: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     colision_vertices: Vec<Point<f64>>,
     colision_indices: Vec<[u32; 3]>,
@@ -915,34 +1050,30 @@ impl Acumulador {
             posiciones: Vec::new(),
             normales: Vec::new(),
             colores: Vec::new(),
+            uvs: Vec::new(),
             indices: Vec::new(),
             colision_vertices: Vec::new(),
             colision_indices: Vec::new(),
         }
     }
 
-    fn vertice(&mut self, p: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> u32 {
+    fn vertice(
+        &mut self,
+        p: [f32; 3],
+        normal: [f32; 3],
+        color: [f32; 4],
+        uv: [f32; 2],
+    ) -> u32 {
         let indice = self.posiciones.len() as u32;
         self.posiciones.push(p);
         self.normales.push(normal);
         self.colores.push(color);
+        self.uvs.push(uv);
         indice
     }
 
     fn triangulo(&mut self, a: u32, b: u32, c: u32) {
         self.indices.extend_from_slice(&[a, b, c]);
-    }
-
-    /// Triángulo del techo: además de la malla visual, alimenta la de colisión.
-    fn techo(&mut self, puntos: [[f32; 3]; 3], color: [f32; 4]) {
-        let inicio = self.colision_vertices.len() as u32;
-        let mut ids = [0u32; 3];
-        for (k, p) in puntos.iter().enumerate() {
-            ids[k] = self.vertice(*p, [0.0, 1.0, 0.0], color);
-            self.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
-        }
-        self.triangulo(ids[0], ids[1], ids[2]);
-        self.colision_indices.push([inicio, inicio + 1, inicio + 2]);
     }
 }
 
@@ -992,6 +1123,505 @@ pub fn contar_edificios(corredor: &Corredor) -> (u32, u32) {
     (total, bloquean)
 }
 
+/// Textura de fachada procedural: módulo de 128×128 px = 1 bahía × 1 piso,
+/// sin costuras en ninguno de los dos ejes (la banda de losa es idéntica en
+/// el borde superior e inferior del módulo). Se muestrea con UV métricos.
+fn textura_fachada() -> Image {
+    const M: usize = 128;
+    let muro = [242u8, 239u8, 232u8];
+    let losa = [212u8, 208u8, 198u8];
+    let vidrio = [74u8, 88u8, 108u8];
+    let marco = [228u8, 225u8, 216u8];
+    let antepecho = [221u8, 217u8, 207u8];
+    let mut px = vec![0u8; M * M * 4];
+    for y in 0..M {
+        for x in 0..M {
+            let c = if y < 8 || y >= M - 8 {
+                losa
+            } else if !(30..=97).contains(&x) {
+                muro
+            } else if y < 12 {
+                antepecho
+            } else if y >= M - 12 {
+                marco
+            } else if x == 30 || x == 31 || x == 96 || x == 97 || x == 63 || x == 64 {
+                marco
+            } else {
+                vidrio
+            };
+            let i = (y * M + x) * 4;
+            px[i] = c[0];
+            px[i + 1] = c[1];
+            px[i + 2] = c[2];
+            px[i + 3] = 255;
+        }
+    }
+    // Cadena de mipmaps (promedio 2×2) para que las fachadas lejanas no
+    // sufran aliasing; el sampler lineal los muestrea al minificar.
+    let mut niveles: Vec<Vec<u8>> = vec![px];
+    let (mut w, mut h) = (M, M);
+    while w > 1 && h > 1 {
+        let prev = niveles.last().unwrap();
+        let (w2, h2) = (w / 2, h / 2);
+        let mut nv = vec![0u8; w2 * h2 * 4];
+        for y in 0..h2 {
+            for x in 0..w2 {
+                for k in 0..4 {
+                    let s = prev[((2 * y) * w + 2 * x) * 4 + k] as u32
+                        + prev[((2 * y) * w + 2 * x + 1) * 4 + k] as u32
+                        + prev[((2 * y + 1) * w + 2 * x) * 4 + k] as u32
+                        + prev[((2 * y + 1) * w + 2 * x + 1) * 4 + k] as u32;
+                    nv[(y * w2 + x) * 4 + k] = (s / 4) as u8;
+                }
+            }
+        }
+        niveles.push(nv);
+        (w, h) = (w2, h2);
+    }
+    let mut datos = Vec::with_capacity(niveles.iter().map(|n| n.len()).sum());
+    for n in &niveles {
+        datos.extend_from_slice(n);
+    }
+    let mut img = Image::new_uninit(
+        Extent3d {
+            width: M as u32,
+            height: M as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    img.texture_descriptor.mip_level_count = niveles.len() as u32;
+    img.data = Some(datos);
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        anisotropy_clamp: 8,
+        ..ImageSamplerDescriptor::linear()
+    });
+    img
+}
+
+/// Color sRGB → lineal con alfa 1 (el material ya está en sRGB).
+fn srgb(c: [f32; 3]) -> [f32; 4] {
+    [c[0].powf(2.2), c[1].powf(2.2), c[2].powf(2.2), 1.0]
+}
+
+fn oscurecer(c: [f32; 4], f: f32) -> [f32; 4] {
+    [c[0] * f, c[1] * f, c[2] * f, c[3]]
+}
+
+fn centroide(plano: &[[f64; 2]]) -> [f64; 2] {
+    [
+        plano.iter().map(|p| p[0]).sum::<f64>() / plano.len() as f64,
+        plano.iter().map(|p| p[1]).sum::<f64>() / plano.len() as f64,
+    ]
+}
+
+/// Eje dominante de la huella (promedio de los bordes ponderado por longitud):
+/// centro, dirección unitaria, semilargo y semiancho.
+fn eje_largo(plano: &[[f64; 2]]) -> ([f64; 2], [f64; 2], f64, f64) {
+    let c = centroide(plano);
+    let (mut ex, mut ey) = (0.0, 0.0);
+    for i in 0..plano.len() {
+        let j = (i + 1) % plano.len();
+        let dx = plano[j][0] - plano[i][0];
+        let dy = plano[j][1] - plano[i][1];
+        let l = dx.hypot(dy);
+        if l < 1e-9 {
+            continue;
+        }
+        let (ux, uy) = if dx < 0.0 { (-dx / l, -dy / l) } else { (dx / l, dy / l) };
+        ex += ux * l;
+        ey += uy * l;
+    }
+    let m = ex.hypot(ey);
+    let dir = if m < 1e-9 { [1.0, 0.0] } else { [ex / m, ey / m] };
+    let (mut largo, mut ancho) = (0.0f64, 0.0f64);
+    for p in plano {
+        let dx = p[0] - c[0];
+        let dy = p[1] - c[1];
+        largo = largo.max((dx * dir[0] + dy * dir[1]).abs());
+        ancho = ancho.max((dx * -dir[1] + dy * dir[0]).abs());
+    }
+    (c, dir, largo, ancho)
+}
+
+/// Huella escalada alrededor de su centroide y corrida `off` m por el eje largo.
+fn escalar(plano: &[[f64; 2]], centro: &[f64; 2], dir: &[f64; 2], s: f64, off: f64) -> Vec<[f64; 2]> {
+    plano
+        .iter()
+        .map(|p| {
+            [
+                centro[0] + (p[0] - centro[0]) * s + dir[0] * off,
+                centro[1] + (p[1] - centro[1]) * s + dir[1] * off,
+            ]
+        })
+        .collect()
+}
+
+/// Rectángulo centrado en `c` con eje `dir` (largo × ancho, en metros).
+fn rect(c: [f64; 2], dir: [f64; 2], largo: f64, ancho: f64) -> Vec<[f64; 2]> {
+    let perp = [-dir[1], dir[0]];
+    let (hl, ha) = (largo / 2.0, ancho / 2.0);
+    [[-hl, -ha], [hl, -ha], [hl, ha], [-hl, ha]]
+        .iter()
+        .map(|[u, v]| [c[0] + dir[0] * u + perp[0] * v, c[1] + dir[1] * u + perp[1] * v])
+        .collect()
+}
+
+/// Voltea la normal si apunta al lado contrario de `hacia`: el winding de los
+/// tambores y pendientes puede dar hacia adentro (cull_mode None lo tolera).
+fn orientar(n: [f32; 3], hacia: [f32; 3]) -> [f32; 3] {
+    if n[0] * hacia[0] + n[1] * hacia[1] + n[2] * hacia[2] < 0.0 {
+        [-n[0], -n[1], -n[2]]
+    } else {
+        n
+    }
+}
+
+fn cuad_colision(malla: &mut Acumulador, vertices: &[[f32; 3]; 4]) {
+    let inicio = malla.colision_vertices.len() as u32;
+    for p in vertices {
+        malla.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
+    }
+    malla.colision_indices.push([inicio, inicio + 1, inicio + 2]);
+    malla.colision_indices.push([inicio, inicio + 2, inicio + 3]);
+}
+
+fn tri_colision(malla: &mut Acumulador, vertices: &[[f32; 3]; 3]) {
+    let inicio = malla.colision_vertices.len() as u32;
+    for p in vertices {
+        malla.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
+    }
+    malla.colision_indices.push([inicio, inicio + 1, inicio + 2]);
+}
+
+/// Prisma con fachada texturizada (UV métricos: u = largo del borde / bahía,
+/// v = altura / piso), colisión y techo plano opcional (UV de muro liso,
+/// color propio para que se lea como azotea).
+fn emitir_edificio(
+    malla: &mut Acumulador,
+    earcut: &mut earcut::Earcut<f64>,
+    triangulos: &mut Vec<u32>,
+    plano: &[[f64; 2]],
+    base: f32,
+    alto: f32,
+    color: [f32; 4],
+    techo_color: [f32; 4],
+    bay: f32,
+    con_techo: bool,
+) {
+    for i in 0..plano.len() {
+        let j = (i + 1) % plano.len();
+        let a = [plano[i][0] as f32, base, plano[i][1] as f32];
+        let b = [plano[j][0] as f32, base, plano[j][1] as f32];
+        let at = [a[0], base + alto, a[2]];
+        let bt = [b[0], base + alto, b[2]];
+        let normal = normal_de(a, b, bt);
+        let u1 = ((b[0] - a[0]).hypot(b[2] - a[2])).max(1e-3) / bay;
+        let v1 = alto / PISO_M;
+        let a0 = malla.vertice(a, normal, color, [0.0, 0.0]);
+        let b0 = malla.vertice(b, normal, color, [u1, 0.0]);
+        let bt0 = malla.vertice(bt, normal, color, [u1, v1]);
+        let at0 = malla.vertice(at, normal, color, [0.0, v1]);
+        malla.triangulo(a0, b0, bt0);
+        malla.triangulo(a0, bt0, at0);
+        cuad_colision(malla, &[a, b, bt, at]);
+    }
+    if con_techo {
+        earcut.earcut_slice(plano, &[] as &[u32], triangulos);
+        for tri in triangulos.chunks_exact(3) {
+            let puntos = [
+                [plano[tri[0] as usize][0] as f32, base + alto, plano[tri[0] as usize][1] as f32],
+                [plano[tri[1] as usize][0] as f32, base + alto, plano[tri[1] as usize][1] as f32],
+                [plano[tri[2] as usize][0] as f32, base + alto, plano[tri[2] as usize][1] as f32],
+            ];
+            let ids = [
+                malla.vertice(puntos[0], [0.0, 1.0, 0.0], techo_color, UV_MURO),
+                malla.vertice(puntos[1], [0.0, 1.0, 0.0], techo_color, UV_MURO),
+                malla.vertice(puntos[2], [0.0, 1.0, 0.0], techo_color, UV_MURO),
+            ];
+            malla.triangulo(ids[0], ids[1], ids[2]);
+            tri_colision(malla, &puntos);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Clase {
+    Normal,
+    Uts,
+    TorreUts,
+    Ocre,
+    Planetario,
+    Casona,
+    Herencia,
+    Institucional,
+}
+
+/// Tipo de edificio. Los landmarks de campus llevan puerta de distancia:
+/// la UIS está a ~4 km del ancla UTS (origen ENU) y viceversa.
+fn clasificar(nombre: Option<&str>, centro: &[f64; 2], alto: f64, destino: &[f64; 2]) -> Clase {
+    let d_uis = (centro[0] - destino[0]).hypot(centro[1] - destino[1]);
+    let d_uts = centro[0].hypot(centro[1]);
+    let n = nombre.unwrap_or("");
+    if d_uis < 500.0 {
+        if n.contains("Ciencias Humanas 2") {
+            return Clase::Ocre;
+        }
+        if n.contains("Planetario") {
+            return Clase::Planetario;
+        }
+        if n.contains("Casona") {
+            return Clase::Casona;
+        }
+        if n.contains("Biblioteca") {
+            return Clase::Herencia;
+        }
+        if n.contains("UIS") || n.contains("USI") {
+            return Clase::Institucional;
+        }
+    }
+    if d_uts < 350.0 {
+        if alto >= 24.0 {
+            return Clase::TorreUts;
+        }
+        if alto >= 10.0 {
+            return Clase::Uts;
+        }
+    }
+    Clase::Normal
+}
+
+/// Facultad de Ciencias Humanas 2 (UIS): tres placas de concreto ocre
+/// escalonadas con núcleos grises en los extremos (Taller de Arquitectura de
+/// Bogotá, premio BAQ 2024 / ArchDaily 2026).
+fn torre_ocre(
+    malla: &mut Acumulador,
+    earcut: &mut earcut::Earcut<f64>,
+    triangulos: &mut Vec<u32>,
+    plano: &[[f64; 2]],
+    base: f32,
+    alto: f32,
+) {
+    let (c, dir, largo, _ancho) = eje_largo(plano);
+    let ocre = srgb(SRGB_OCRE);
+    let gris = srgb(SRGB_GRIS);
+    let escalas = [1.0f64, 0.93, 0.86];
+    let offs = [0.0f64, 1.8, -1.8];
+    let h = alto / 3.0;
+    for k in 0..3 {
+        let huella = escalar(plano, &c, &dir, escalas[k], offs[k]);
+        emitir_edificio(
+            malla,
+            earcut,
+            triangulos,
+            &huella,
+            base + k as f32 * h,
+            h,
+            ocre,
+            gris,
+            3.0,
+            true,
+        );
+    }
+    // Núcleos grises de servicio en ambos extremos, altura completa.
+    for s in [-1.0f64, 1.0] {
+        let nucleo = rect(
+            [
+                c[0] + dir[0] * s * (largo / 2.0 - 4.0),
+                c[1] + dir[1] * s * (largo / 2.0 - 4.0),
+            ],
+            dir,
+            6.0,
+            3.5,
+        );
+        emitir_edificio(malla, earcut, triangulos, &nucleo, base, alto, gris, gris, 3.0, true);
+    }
+    // Caja de azotea.
+    let caja = rect(c, dir, 8.0, 5.0);
+    emitir_edificio(
+        malla,
+        earcut,
+        triangulos,
+        &caja,
+        base + alto,
+        2.0,
+        gris,
+        gris,
+        3.0,
+        true,
+    );
+}
+
+/// Planetario UIS: bar institucional + tambor cilíndrico acristalado +
+/// cúpula semiesférica.
+fn planeta(
+    malla: &mut Acumulador,
+    earcut: &mut earcut::Earcut<f64>,
+    triangulos: &mut Vec<u32>,
+    plano: &[[f64; 2]],
+    base: f32,
+) {
+    let inst = srgb(SRGB_INSTITUCIONAL);
+    let tambor = srgb(SRGB_CILINDRO);
+    let cupula = srgb(SRGB_CUPULA);
+    let (c, _dir, _largo, _ancho) = eje_largo(plano);
+    emitir_edificio(
+        malla,
+        earcut,
+        triangulos,
+        plano,
+        base,
+        3.0,
+        inst,
+        srgb(SRGB_GRIS),
+        3.2,
+        true,
+    );
+    // Tambor: cilindro de 16 segmentos, r 3.5 m, ventanas por arco.
+    let r = 3.5f32;
+    let y0 = base + 3.0;
+    let y1 = base + 6.5;
+    let seg = 16usize;
+    let (cx, cz) = (c[0] as f32, c[1] as f32);
+    for i in 0..seg {
+        let t0 = std::f32::consts::TAU * i as f32 / seg as f32;
+        let t1 = std::f32::consts::TAU * (i + 1) as f32 / seg as f32;
+        let tm = (t0 + t1) / 2.0;
+        let n = [tm.cos(), 0.0, tm.sin()];
+        let p = |t: f32, y: f32| [cx + r * t.cos(), y, cz + r * t.sin()];
+        let (a, b, at, bt) = (p(t0, y0), p(t1, y0), p(t0, y1), p(t1, y1));
+        let (u0, u1, v1) = (t0 * r / 3.0, t1 * r / 3.0, (y1 - y0) / PISO_M);
+        let a0 = malla.vertice(a, n, tambor, [u0, 0.0]);
+        let b0 = malla.vertice(b, n, tambor, [u1, 0.0]);
+        let bt0 = malla.vertice(bt, n, tambor, [u1, v1]);
+        let at0 = malla.vertice(at, n, tambor, [u0, v1]);
+        malla.triangulo(a0, b0, bt0);
+        malla.triangulo(a0, bt0, at0);
+        cuad_colision(malla, &[a, b, bt, at]);
+    }
+    // Cúpula semiesférica: abanico del ápice + 4 bandas, normales radiales.
+    let anillos = 5usize;
+    let phi = |k: usize| (k as f32 / anillos as f32) * std::f32::consts::FRAC_PI_2;
+    let q = |t: f32, rr: f32, yy: f32| [cx + rr * t.cos(), yy, cz + rr * t.sin()];
+    let n_radial = |t: f32, ph: f32| [ph.sin() * t.cos(), ph.cos(), ph.sin() * t.sin()];
+    let apex = [cx, y1 + r, cz];
+    let na = [0.0, 1.0, 0.0];
+    for i in 0..seg {
+        let t0 = std::f32::consts::TAU * i as f32 / seg as f32;
+        let t1 = std::f32::consts::TAU * (i + 1) as f32 / seg as f32;
+        let ph = phi(1);
+        let rr = r * ph.sin();
+        let yy = y1 + r * ph.cos();
+        let p0 = q(t0, rr, yy);
+        let p1 = q(t1, rr, yy);
+        let ia = malla.vertice(apex, na, cupula, UV_MURO);
+        let ib = malla.vertice(p0, n_radial(t0, ph), cupula, UV_MURO);
+        let ic = malla.vertice(p1, n_radial(t1, ph), cupula, UV_MURO);
+        malla.triangulo(ia, ib, ic);
+        tri_colision(malla, &[apex, p0, p1]);
+    }
+    for k in 1..anillos {
+        let (ph0, ph1) = (phi(k), phi(k + 1));
+        let (r0, r1) = (r * ph0.sin(), r * ph1.sin());
+        let (ya, yb) = (y1 + r * ph0.cos(), y1 + r * ph1.cos());
+        for i in 0..seg {
+            let t0 = std::f32::consts::TAU * i as f32 / seg as f32;
+            let t1 = std::f32::consts::TAU * (i + 1) as f32 / seg as f32;
+            let (a, b, at, bt) = (q(t0, r0, ya), q(t1, r0, ya), q(t0, r1, yb), q(t1, r1, yb));
+            let ia = malla.vertice(a, n_radial(t0, ph0), cupula, UV_MURO);
+            let ib = malla.vertice(b, n_radial(t1, ph0), cupula, UV_MURO);
+            let ibt = malla.vertice(bt, n_radial(t1, ph1), cupula, UV_MURO);
+            let iat = malla.vertice(at, n_radial(t0, ph1), cupula, UV_MURO);
+            malla.triangulo(ia, ib, ibt);
+            malla.triangulo(ia, ibt, iat);
+            cuad_colision(malla, &[a, b, bt, at]);
+        }
+    }
+}
+
+/// Casona La Perla (UIS): muros crema + cubierta a dos aguas de teja con
+/// caballete a +1.7 m sobre las correas (aproximación por bbox).
+fn casona(
+    malla: &mut Acumulador,
+    earcut: &mut earcut::Earcut<f64>,
+    triangulos: &mut Vec<u32>,
+    plano: &[[f64; 2]],
+    base: f32,
+    alto: f32,
+) {
+    let crema = srgb(SRGB_CREMA);
+    let teja = srgb(SRGB_TERRACOTA);
+    let (c, dir, largo, ancho) = eje_largo(plano);
+    emitir_edificio(
+        malla,
+        earcut,
+        triangulos,
+        plano,
+        base,
+        alto,
+        crema,
+        crema,
+        3.0,
+        false,
+    );
+    let alero = base + alto;
+    let cab = alero + 1.7;
+    let perp = [-dir[1], dir[0]];
+    let (hl, ha) = (largo / 2.0, ancho / 2.0);
+    for s in [-1.0f64, 1.0] {
+        // Pendiente: cuad desde el alero (lado s) hasta el caballete.
+        let e0 = [
+            c[0] + dir[0] * hl + perp[0] * s * ha,
+            c[1] + dir[1] * hl + perp[1] * s * ha,
+        ];
+        let e1 = [
+            c[0] - dir[0] * hl + perp[0] * s * ha,
+            c[1] - dir[1] * hl + perp[1] * s * ha,
+        ];
+        let r0 = [c[0] + dir[0] * hl, c[1] + dir[1] * hl];
+        let r1 = [c[0] - dir[0] * hl, c[1] - dir[1] * hl];
+        let a = [e0[0] as f32, alero, e0[1] as f32];
+        let b = [e1[0] as f32, alero, e1[1] as f32];
+        let at = [r0[0] as f32, cab, r0[1] as f32];
+        let bt = [r1[0] as f32, cab, r1[1] as f32];
+        let hacia = [perp[0] as f32 * s as f32, 0.4, perp[1] as f32 * s as f32];
+        let n = orientar(normal_de(a, b, bt), hacia);
+        let ia = malla.vertice(a, n, teja, UV_MURO);
+        let ib = malla.vertice(b, n, teja, UV_MURO);
+        let ibt = malla.vertice(bt, n, teja, UV_MURO);
+        let iat = malla.vertice(at, n, teja, UV_MURO);
+        malla.triangulo(ia, ib, ibt);
+        malla.triangulo(ia, ibt, iat);
+        cuad_colision(malla, &[a, b, bt, at]);
+    }
+    // Caballetes: triángulos crema en los extremos del eje largo.
+    for s in [-1.0f64, 1.0] {
+        let g0 = [
+            c[0] + dir[0] * s * hl + perp[0] * ha,
+            c[1] + dir[1] * s * hl + perp[1] * ha,
+        ];
+        let g1 = [
+            c[0] + dir[0] * s * hl - perp[0] * ha,
+            c[1] + dir[1] * s * hl - perp[1] * ha,
+        ];
+        let rg = [c[0] + dir[0] * s * hl, c[1] + dir[1] * s * hl];
+        let p0 = [g0[0] as f32, alero, g0[1] as f32];
+        let p1 = [g1[0] as f32, alero, g1[1] as f32];
+        let p2 = [rg[0] as f32, cab, rg[1] as f32];
+        let hacia = [dir[0] as f32 * s as f32, 0.0, dir[1] as f32 * s as f32];
+        let n = orientar(normal_de(p0, p1, p2), hacia);
+        let i0 = malla.vertice(p0, n, crema, UV_MURO);
+        let i1 = malla.vertice(p1, n, crema, UV_MURO);
+        let i2 = malla.vertice(p2, n, crema, UV_MURO);
+        malla.triangulo(i0, i1, i2);
+        tri_colision(malla, &[p0, p1, p2]);
+    }
+}
+
 fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
     let texto = std::fs::read_to_string("assets/edificios.geojson").unwrap_or_default();
     let json: serde_json::Value = serde_json::from_str(&texto).unwrap_or_default();
@@ -1011,10 +1641,7 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
             .iter()
             .map(|p| enu_de(p[1].as_f64().unwrap_or(0.0), p[0].as_f64().unwrap_or(0.0)))
             .collect();
-        let centro = [
-            plano.iter().map(|p| p[0]).sum::<f64>() / plano.len() as f64,
-            plano.iter().map(|p| p[1]).sum::<f64>() / plano.len() as f64,
-        ];
+        let centro = centroide(&plano);
         let en_extremo = |p: &[f64; 2]| (p[0] - centro[0]).hypot(p[1] - centro[1]) < 20.0;
         if punto_dentro(&[0.0, 0.0], &plano)
             || punto_dentro(&corredor.desplazamiento, &plano)
@@ -1028,7 +1655,7 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
         // la altura puntual de ion sirve de respaldo.
         let suelo_rel = corredor.agl(centro[0], centro[1]);
         let base = suelo_rel as f32 + 0.12;
-        let alto = feature["properties"]["height"]
+        let alto_f64 = feature["properties"]["height"]
             .as_f64()
             .filter(|h| *h > 1.0)
             .or_else(|| {
@@ -1037,46 +1664,174 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
                     .filter(|n| *n > 0.0)
                     .map(|n| n * 3.2 + 1.5)
             })
-            .unwrap_or(9.0) as f32;
+            .unwrap_or(9.0);
+        let alto = alto_f64 as f32;
+        let nombre = feature["properties"]["name"].as_str();
 
-        let tinte = TINTES[orden % TINTES.len()];
-        let color = [
-            (BASE[0] * tinte[0]).powf(2.2),
-            (BASE[1] * tinte[1]).powf(2.2),
-            (BASE[2] * tinte[2]).powf(2.2),
-            1.0,
-        ];
-
-        for i in 0..plano.len() {
-            let j = (i + 1) % plano.len();
-            let a = [plano[i][0] as f32, base, plano[i][1] as f32];
-            let b = [plano[j][0] as f32, base, plano[j][1] as f32];
-            let at = [a[0], base + alto, a[2]];
-            let bt = [b[0], base + alto, b[2]];
-            let normal = normal_de(a, b, bt);
-            let a0 = malla.vertice(a, normal, color);
-            let b0 = malla.vertice(b, normal, color);
-            let bt0 = malla.vertice(bt, normal, color);
-            let at0 = malla.vertice(at, normal, color);
-            malla.triangulo(a0, b0, bt0);
-            malla.triangulo(a0, bt0, at0);
-
-            let inicio = malla.colision_vertices.len() as u32;
-            for p in [a, b, bt, at] {
-                malla.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        match clasificar(nombre, &centro, alto_f64, &corredor.desplazamiento) {
+            Clase::Normal => {
+                let tinte = TINTES[orden % TINTES.len()];
+                let color = [
+                    (BASE[0] * tinte[0]).powf(2.2),
+                    (BASE[1] * tinte[1]).powf(2.2),
+                    (BASE[2] * tinte[2]).powf(2.2),
+                    1.0,
+                ];
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &plano,
+                    base,
+                    alto,
+                    color,
+                    oscurecer(color, 0.72),
+                    3.6,
+                    true,
+                );
             }
-            malla.colision_indices.push([inicio, inicio + 1, inicio + 2]);
-            malla.colision_indices.push([inicio, inicio + 2, inicio + 3]);
-        }
-
-        earcut.earcut_slice(&plano, &[] as &[u32], &mut triangulos);
-        for tri in triangulos.chunks_exact(3) {
-            let puntos = [
-                [plano[tri[0] as usize][0] as f32, base + alto, plano[tri[0] as usize][1] as f32],
-                [plano[tri[1] as usize][0] as f32, base + alto, plano[tri[1] as usize][1] as f32],
-                [plano[tri[2] as usize][0] as f32, base + alto, plano[tri[2] as usize][1] as f32],
-            ];
-            malla.techo(puntos, color);
+            Clase::Uts => {
+                let campus = srgb(SRGB_CAMPUS_UTS);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &plano,
+                    base,
+                    alto,
+                    campus,
+                    oscurecer(campus, 0.8),
+                    3.2,
+                    true,
+                );
+            }
+            Clase::TorreUts => {
+                let (c, dir, largo, ancho) = eje_largo(&plano);
+                let campus = srgb(SRGB_CAMPUS_UTS);
+                let corona = srgb(SRGB_CORONA_UTS);
+                let gris = srgb(SRGB_GRIS);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &plano,
+                    base,
+                    alto - 1.4,
+                    campus,
+                    oscurecer(campus, 0.8),
+                    3.2,
+                    true,
+                );
+                let banda = escalar(&plano, &c, &dir, 1.02, 0.0);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &banda,
+                    base + alto - 1.4,
+                    1.4,
+                    corona,
+                    corona,
+                    3.2,
+                    true,
+                );
+                let caja = rect(c, dir, largo * 0.7, ancho * 0.7);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &caja,
+                    base + alto,
+                    2.0,
+                    gris,
+                    gris,
+                    3.2,
+                    true,
+                );
+            }
+            Clase::Herencia => {
+                let (c, dir, _l, _a) = eje_largo(&plano);
+                let ladrillo = srgb(SRGB_LADRILLO);
+                let osc = oscurecer(ladrillo, 0.8);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &plano,
+                    base,
+                    alto - 0.7,
+                    ladrillo,
+                    osc,
+                    2.4,
+                    true,
+                );
+                let banda = escalar(&plano, &c, &dir, 1.03, 0.0);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &banda,
+                    base + alto - 0.7,
+                    0.7,
+                    osc,
+                    osc,
+                    2.4,
+                    true,
+                );
+            }
+            Clase::Institucional => {
+                let (c, dir, _l, _a) = eje_largo(&plano);
+                let inst = srgb(SRGB_INSTITUCIONAL);
+                let gris = srgb(SRGB_GRIS);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &plano,
+                    base,
+                    alto - 0.7,
+                    inst,
+                    oscurecer(inst, 0.8),
+                    3.2,
+                    true,
+                );
+                let banda = escalar(&plano, &c, &dir, 1.015, 0.0);
+                emitir_edificio(
+                    &mut malla,
+                    &mut earcut,
+                    &mut triangulos,
+                    &banda,
+                    base + alto - 0.7,
+                    0.7,
+                    gris,
+                    gris,
+                    3.2,
+                    true,
+                );
+            }
+            Clase::Ocre => torre_ocre(
+                &mut malla,
+                &mut earcut,
+                &mut triangulos,
+                &plano,
+                base,
+                alto,
+            ),
+            Clase::Planetario => planeta(
+                &mut malla,
+                &mut earcut,
+                &mut triangulos,
+                &plano,
+                base,
+            ),
+            Clase::Casona => casona(
+                &mut malla,
+                &mut earcut,
+                &mut triangulos,
+                &plano,
+                base,
+                alto,
+            ),
         }
     }
 
@@ -1087,6 +1842,7 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, malla.posiciones);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, malla.normales);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, malla.colores);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, malla.uvs);
     mesh.insert_indices(Indices::U32(malla.indices));
     let trimesh = TriMesh::new(malla.colision_vertices, malla.colision_indices);
     (Some(mesh), Some(trimesh))
@@ -1316,4 +2072,220 @@ fn poner_icono(
     };
     ventana.set_window_icon(Some(icono));
     *hecho = true;
+}
+
+#[cfg(test)]
+mod pruebas_edificios {
+    use super::*;
+
+    #[test]
+    fn fachada_es_modular_sin_costuras() {
+        let img = textura_fachada();
+        assert_eq!(img.texture_descriptor.size.width, 128);
+        assert_eq!(img.texture_descriptor.size.height, 128);
+        assert!(img.texture_descriptor.mip_level_count > 1, "cadena de mipmaps");
+        let d = img.data.as_ref().unwrap();
+        let px = |x: usize, y: usize| -> [u8; 3] {
+            let i = (y * 128 + x) * 4;
+            [d[i], d[i + 1], d[i + 2]]
+        };
+        // Sin costuras: los bordes opuestos del módulo son iguales (banda de
+        // losa arriba y abajo; muro a los lados de la ventana).
+        for k in 0..128 {
+            assert_eq!(px(k, 0), px(k, 127), "costura horizontal en x={k}");
+            assert_eq!(px(0, k), px(127, k), "costura vertical en y={k}");
+        }
+        let (mut vidrio, mut muro) = (0usize, 0usize);
+        for y in 0..128 {
+            for x in 0..128 {
+                let [r, g, b] = px(x, y);
+                if b > r + 8 && r < 120 {
+                    vidrio += 1;
+                }
+                if r > 230 && g > 225 && b > 215 {
+                    muro += 1;
+                }
+            }
+        }
+        assert!(vidrio > 2000, "ventanas en la textura: {vidrio}");
+        assert!(muro > 3000, "muro en la textura: {muro}");
+    }
+
+    #[test]
+    fn clasifica_landmarks_y_gatea_por_distancia() {
+        let destino = [100.0, 200.0]; // ancla UIS en ENU (la UTS es el origen)
+        assert_eq!(
+            clasificar(Some("(UIS 9) Facultad de Ciencias Humanas 2"), &[102.0, 201.0], 27.0, &destino),
+            Clase::Ocre
+        );
+        // mismo nombre, pero a 1.6 km de la UIS: no es landmark
+        assert_eq!(
+            clasificar(Some("(UIS 9) Facultad de Ciencias Humanas 2"), &[1600.0, 200.0], 27.0, &destino),
+            Clase::Normal
+        );
+        assert_eq!(clasificar(Some("Planetario UIS"), &[110.0, 205.0], 8.0, &destino), Clase::Planetario);
+        assert_eq!(clasificar(Some("(UIS 8) Casona La Perla"), &[105.0, 195.0], 3.0, &destino), Clase::Casona);
+        assert_eq!(clasificar(Some("(UIS 12) Biblioteca"), &[103.0, 202.0], 15.0, &destino), Clase::Herencia);
+        // la Biblioteca Pública Gabriel Turbay (1.6 km) no es campus
+        assert_eq!(
+            clasificar(Some("Biblioteca Pública Gabriel Turbay"), &[1500.0, 200.0], 20.7, &destino),
+            Clase::Normal
+        );
+        assert_eq!(clasificar(None, &[40.0, 10.0], 33.5, &destino), Clase::TorreUts);
+        assert_eq!(clasificar(None, &[100.0, 30.0], 17.5, &destino), Clase::Uts);
+        assert_eq!(clasificar(None, &[2000.0, 2000.0], 65.0, &destino), Clase::Normal);
+        assert_eq!(clasificar(Some("(UIS 35) EDIC"), &[120.0, 210.0], 20.7, &destino), Clase::Institucional);
+    }
+
+    #[test]
+    fn malla_de_ciudad_lleva_uvs_y_landmarks() {
+        let corredor = Corredor::cargar();
+        let (malla_opt, colision) = malla_edificios(&corredor);
+        let malla = malla_opt.expect("malla de edificios");
+        assert!(colision.is_some(), "colisión TriMesh");
+        let n_pos = match malla.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(v)) => v.len(),
+            _ => panic!("sin posiciones"),
+        };
+        let uvs = match malla.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(VertexAttributeValues::Float32x2(v)) => v.clone(),
+            _ => panic!("sin UVs"),
+        };
+        assert_eq!(uvs.len(), n_pos, "un UV por vértice");
+        let (u_max, v_max) = uvs
+            .iter()
+            .fold((0.0f32, 0.0f32), |(mu, mv), &[u, v]| (mu.max(u), mv.max(v)));
+        assert!(u_max > 4.0, "fachadas anchas repiten bahías (u_max={u_max})");
+        assert!(v_max > 1.0, "edificios altos repiten pisos (v_max={v_max})");
+
+        // Los landmarks dejaron su color lineal en los vértices de la malla.
+        let cols = match malla.attribute(Mesh::ATTRIBUTE_COLOR) {
+            Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+            _ => panic!("sin colores"),
+        };
+        assert_eq!(cols.len(), n_pos);
+        let lin = |s: f32| s.powf(2.2);
+        let cuenta = |r: f32, g: f32, b: f32| -> usize {
+            cols.iter()
+                .filter(|c| (c[0] - r).abs() < 0.02 && (c[1] - g).abs() < 0.02 && (c[2] - b).abs() < 0.02)
+                .count()
+        };
+        assert!(cuenta(lin(0.78), lin(0.58), lin(0.36)) >= 24, "torre ocre UIS");
+        assert!(cuenta(lin(0.64), lin(0.46), lin(0.36)) >= 24, "biblioteca en ladrillo");
+        assert!(cuenta(lin(0.84), lin(0.80), lin(0.72)) >= 12, "casona crema");
+        assert!(cuenta(lin(0.60), lin(0.34), lin(0.24)) >= 6, "teja terracota");
+        assert!(cuenta(lin(0.60), lin(0.63), lin(0.68)) >= 100, "cúpula del planetario");
+        assert!(cuenta(lin(0.30), lin(0.48), lin(0.72)) >= 16, "coronas azules UTS");
+    }
+
+    #[test]
+    fn perfil_ruta_voltea_extremos_y_etapas() {
+        let c = Corredor::cargar();
+        let f = perfil_ruta(&c, false);
+        let i = perfil_ruta(&c, true);
+        // extremos: origen/destino intercambiados (suelo de cada campus)
+        assert!((f[0][0] - 0.0).abs() < 1e-6 && (f[0][1] - 0.0).abs() < 1e-6);
+        assert!((i[0][0] - c.desplazamiento[0]).abs() < 1e-6
+            && (i[0][1] - c.desplazamiento[1]).abs() < 1e-6);
+        assert!((i.last().unwrap()[0] - 0.0).abs() < 1e-6
+            && (i.last().unwrap()[1] - 0.0).abs() < 1e-6);
+        // las etapas son los mismos puntos geométricos, en orden inverso
+        let n = f.len();
+        for k in 1..n - 1 {
+            for axis in 0..3 {
+                assert!((f[k][axis] - i[n - 1 - k][axis]).abs() < 1e-6,
+                    "etapa {k} eje {axis}: {} vs {}", f[k][axis], i[n - 1 - k][axis]);
+            }
+        }
+        // el perfil vertical se voltea: el segundo punto es el despegue vertical
+        assert!(f[1][2] - f[0][2] > 40.0);
+        assert!(i[1][2] - i[0][2] > 40.0);
+    }
+}
+
+#[cfg(test)]
+mod pruebas_sentido {
+    use super::*;
+
+    /// Color sRGB del material de una entidad con MeshMaterial3d<StandardMaterial>.
+    fn color_de(app: &App, e: Entity) -> [f32; 4] {
+        let mundo = app.world();
+        let MeshMaterial3d(maneijador) = mundo
+            .entity(e)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .expect("material de zona");
+        let material = mundo
+            .resource::<Assets<StandardMaterial>>()
+            .get(maneijador)
+            .expect("material registrado");
+        let c = material.base_color.to_srgba();
+        [c.red, c.green, c.blue, c.alpha]
+    }
+
+    #[test]
+    fn aplicar_sentido_reconstruye_vuelo_cinta_zonas_y_titulo() {
+        let corredor = Corredor::cargar();
+        let ruta_ida = perfil_ruta(&corredor, false);
+        let ruta_vuelta = perfil_ruta(&corredor, true);
+
+        let mut app = App::new();
+        app.insert_resource(corredor)
+            .insert_resource(Sentido::UtsAUis)
+            .insert_resource(Vuelo::nuevo(ruta_ida.clone()))
+            .init_resource::<Zonas>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, aplicar_sentido);
+
+        // Entidades como las crearía construir_escena.
+        let mundo = app.world_mut();
+        let cinta = mundo.spawn(CintaRuta).id();
+        let ventana = mundo.spawn(Window::default()).id();
+        let mut zonas = Zonas::default();
+        for (campus, color) in [
+            (&mut zonas.uts, Color::srgb(0.35, 0.83, 1.0)),
+            (&mut zonas.uis, Color::srgb(0.5, 0.9, 0.6)),
+        ] {
+            let (anillo, haz) = {
+                let mut materiales = mundo.resource_mut::<Assets<StandardMaterial>>();
+                let ma = materiales.add(StandardMaterial { base_color: color, ..default() });
+                let mh = materiales.add(StandardMaterial { base_color: color, ..default() });
+                (
+                    mundo.spawn(MeshMaterial3d(ma)).id(),
+                    mundo.spawn(MeshMaterial3d(mh)).id(),
+                )
+            };
+            *campus = Some((anillo, haz));
+        }
+        mundo.insert_resource(zonas);
+
+        // Primera actualización: aplica el sentido por defecto.
+        app.update();
+        let mundo = app.world();
+        assert_eq!(mundo.resource::<Vuelo>().ruta, ruta_ida);
+        assert!(mundo.entity(cinta).get::<Mesh3d>().is_some(), "cinta re-insertada");
+        let titulo = mundo.entity(ventana).get::<Window>().unwrap().title.clone();
+        assert!(titulo.contains("UTS → UIS"), "título: {titulo}");
+        let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UTS azul");
+        let [r, g, b, _] = color_de(&app, h);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "haz UTS azul");
+
+        // Voltear: el vuelo se reconstruye desde UIS, los colores se intercambian.
+        *app.world_mut().resource_mut::<Sentido>() = Sentido::UisAuts;
+        app.update();
+        let mundo = app.world();
+        assert_eq!(mundo.resource::<Vuelo>().ruta, ruta_vuelta);
+        let titulo = mundo.entity(ventana).get::<Window>().unwrap().title.clone();
+        assert!(titulo.contains("UIS → UTS"), "título: {titulo}");
+        let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "anillo UTS verde al invertir");
+        let [r, g, b, _] = color_de(&app, h);
+        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "haz UTS verde al invertir");
+        let (a, _) = mundo.resource::<Zonas>().uis.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UIS azul al invertir");
+    }
 }
