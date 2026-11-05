@@ -608,13 +608,27 @@ fn fps_promedio(tiempo: Res<Time>, vuelo: Res<Vuelo>, mut acum: Local<f32>, mut 
 }
 
 /// Con `CAPTURA=1` guarda tres fotogramas del vuelo en `capturas/`.
-fn captura(mut commands: Commands, mut hechos: Local<Vec<u8>>, tiempo: Res<Time>) {
+fn captura(
+    mut commands: Commands,
+    mut hechos: Local<Vec<u8>>,
+    tiempo: Res<Time>,
+    vel: Res<VelSim>,
+) {
     if std::env::var("CAPTURA").is_err() {
         return;
     }
-    let marcas: [(f32, &str); 3] = [(1.6, "01-presentacion"), (8.0, "02-despegue"), (30.0, "03-crucero")];
+    // Marcas en tiempo de simulación; en muro se comprimen por la velocidad
+    // (con un piso de 1.2 s para que la escena alcance a construirse).
+    let marcas: [(f32, &str); 4] = [
+        (3.0, "01-presentacion"),
+        (60.0, "02-despegue"),
+        (150.0, "03-crucero"),
+        (262.0, "04-uis"),
+    ];
     for (indice, (marca, nombre)) in marcas.into_iter().enumerate() {
-        if tiempo.elapsed_secs() > marca && !hechos.contains(&(indice as u8)) {
+        if tiempo.elapsed_secs() > (marca / vel.0 as f32).max(1.2)
+            && !hechos.contains(&(indice as u8))
+        {
             hechos.push(indice as u8);
             let ruta = format!("capturas/{nombre}.png");
             commands
