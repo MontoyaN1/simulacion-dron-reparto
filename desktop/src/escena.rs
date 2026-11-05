@@ -12,7 +12,7 @@ use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::Face;
 use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::EguiContexts;
 use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
@@ -47,6 +47,7 @@ impl Plugin for EscenaPlugin {
             affects_lightmapped_meshes: false,
         })
         .insert_resource(Sentido::default())
+        .init_resource::<Zonas>()
         .insert_resource(Vuelo::nuevo(ruta))
             .insert_resource(corredor)
             .init_resource::<ColisionEdificios>()
@@ -57,6 +58,7 @@ impl Plugin for EscenaPlugin {
             .add_systems(
                 Update,
                 (
+                    aplicar_sentido,
                     entrada_camara,
                     seguir_dron,
                     animar_dron,
@@ -529,6 +531,50 @@ fn pulso_marcas(tiempo: Res<Time>, mut zonas: Query<&mut Transform, With<ZonaMar
     }
 }
 
+/// Voltea la ruta en caliente: reconstruye el vuelo desde el nuevo origen,
+/// re-inserta la malla de la cinta, intercambia los colores de las zonas
+/// (azul = origen, verde = destino) y actualiza el título de la ventana.
+/// Se ejecuta una sola vez por cambio de sentido (Local como memo del último
+/// estado aplicado). El motor, las fases, la telemetría, la colisión y la
+/// cámara son agnósticos al sentido: solo consumen la polilínea.
+fn aplicar_sentido(
+    mut visto: Local<Option<Sentido>>,
+    sentido: Res<Sentido>,
+    mut vuelo: ResMut<Vuelo>,
+    corredor: Res<Corredor>,
+    mut mallas: ResMut<Assets<Mesh>>,
+    mut materiales: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+    cintas: Query<Entity, With<CintaRuta>>,
+    zonas: Res<Zonas>,
+    mut ventanas: Query<&mut Window>,
+) {
+    if *visto == Some(*sentido) {
+        return;
+    }
+    let invertida = *sentido == Sentido::UisAuts;
+    let ruta = perfil_ruta(&corredor, invertida);
+    *vuelo = Vuelo::nuevo(ruta.clone());
+    if let Ok(cinta) = cintas.single() {
+        commands.entity(cinta).insert(Mesh3d(mallas.add(cinta_ruta(&ruta))));
+    }
+    // Azul siempre marca el origen; al invertir, UIS pasa a ser el origen.
+    let (azul, verde) = (color_origen(), color_destino());
+    let (uts, uis) = if invertida { (verde, azul) } else { (azul, verde) };
+    if let Some((anillo, haz)) = zonas.uts {
+        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.55)));
+        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.22)));
+    }
+    if let Some((anillo, haz)) = zonas.uis {
+        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.55)));
+        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.22)));
+    }
+    if let Ok(mut ventana) = ventanas.single_mut() {
+        ventana.title = format!("Dron {} · Estación de control", sentido.nombre());
+    }
+    *visto = Some(*sentido);
+}
+
 fn construir_escena(
     mut commands: Commands,
     mut mallas: ResMut<Assets<Mesh>>,
@@ -630,6 +676,7 @@ fn construir_escena(
 
     // Ruta pintada en escena: el piloto ve el trazado que sigue el dron.
     commands.spawn((
+        CintaRuta,
         Mesh3d(mallas.add(cinta_ruta(&vuelo.ruta))),
         MeshMaterial3d(materiales.add(StandardMaterial {
             unlit: true,
@@ -641,8 +688,10 @@ fn construir_escena(
     ));
 
     // Anillos de salida (UTS) y llegada (UIS) con su haz vertical.
-    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], Color::srgb(0.35, 0.83, 1.0));
-    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, Color::srgb(0.5, 0.9, 0.6));
+    // Azul = origen del vuelo, verde = destino (aplicar_sentido los intercambia).
+    let uts = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], color_origen());
+    let uis = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, color_destino());
+    commands.insert_resource(Zonas { uts: Some(uts), uis: Some(uis) });
 
     // Capa de nubes: domo gigante a 20 km con textura horneada.
     if std::path::Path::new("assets/nubes.png").exists() {
@@ -676,7 +725,8 @@ fn construir_escena(
     commands.insert_resource(Camara { pos: vista, ..default() });
 }
 
-/** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m. */
+/** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m.
+ * Devuelve (anillo, haz) para poder intercambiar colores según el sentido. */
 fn spawn_zona(
     commands: &mut Commands,
     mallas: &mut Assets<Mesh>,
@@ -684,32 +734,20 @@ fn spawn_zona(
     corredor: &Corredor,
     pos_enu: [f64; 2],
     color: Color,
-) {
-    let c = color.to_srgba();
+) -> (Entity, Entity) {
     let suelo = corredor.agl(pos_enu[0], pos_enu[1]) as f32;
     let centro = Vec3::new(pos_enu[0] as f32, suelo + 0.3, pos_enu[1] as f32);
-    commands.spawn((
+    let anillo = commands.spawn((
         ZonaMarcada,
         Mesh3d(mallas.add(anillo(7.0, 11.0, 48))),
-        MeshMaterial3d(materiales.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::srgba(c.red, c.green, c.blue, 0.55),
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            ..default()
-        })),
+        MeshMaterial3d(material_zona(materiales, color, 0.55)),
         Transform::from_translation(centro),
-    ));
-    commands.spawn((
+    )).id();
+    let haz = commands.spawn((
         Mesh3d(mallas.add(haz_luz(centro, 90.0))),
-        MeshMaterial3d(materiales.add(StandardMaterial {
-            unlit: true,
-            base_color: Color::srgba(c.red, c.green, c.blue, 0.22),
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            ..default()
-        })),
-    ));
+        MeshMaterial3d(material_zona(materiales, color, 0.22)),
+    )).id();
+    (anillo, haz)
 }
 
 /** Cinta de 1,8 m de ancho sobre la ruta, para verla de lejos. */
@@ -814,6 +852,39 @@ fn domo_nubes(radio: f32, sectores: u32, capas: u32) -> Mesh {
 
 #[derive(Component)]
 struct ZonaMarcada;
+
+/// Marcador de la malla de la cinta de ruta, para re-insertarla al voltear el sentido.
+#[derive(Component)]
+struct CintaRuta;
+
+/// Anillo y haz de cada campus, para intercambiar sus colores según el sentido.
+#[derive(Resource, Default)]
+struct Zonas {
+    uts: Option<(Entity, Entity)>,
+    uis: Option<(Entity, Entity)>,
+}
+
+/// Azul: siempre marca el origen del vuelo.
+fn color_origen() -> Color {
+    Color::srgb(0.35, 0.83, 1.0)
+}
+
+/// Verde: siempre marca el destino del vuelo.
+fn color_destino() -> Color {
+    Color::srgb(0.5, 0.9, 0.6)
+}
+
+/// Material de zona: anillo (alfa 0.55) o haz vertical (alfa 0.22).
+fn material_zona(materiales: &mut Assets<StandardMaterial>, color: Color, alfa: f32) -> Handle<StandardMaterial> {
+    let c = color.to_srgba();
+    materiales.add(StandardMaterial {
+        unlit: true,
+        base_color: Color::srgba(c.red, c.green, c.blue, alfa),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    })
+}
 
 /// Plano de presentación: el corredor en perspectiva, desde atrás y a la izquierda.
 fn vista_amplia(corredor: &Corredor) -> (Vec3, Vec3) {
@@ -2123,5 +2194,92 @@ mod pruebas_edificios {
         // el perfil vertical se voltea: el segundo punto es el despegue vertical
         assert!(f[1][2] - f[0][2] > 40.0);
         assert!(i[1][2] - i[0][2] > 40.0);
+    }
+}
+
+#[cfg(test)]
+mod pruebas_sentido {
+    use super::*;
+
+    /// Color sRGB del material de una entidad con MeshMaterial3d<StandardMaterial>.
+    fn color_de(app: &App, e: Entity) -> [f32; 4] {
+        let mundo = app.world();
+        let MeshMaterial3d(maneijador) = mundo
+            .entity(e)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .expect("material de zona");
+        let material = mundo
+            .resource::<Assets<StandardMaterial>>()
+            .get(maneijador)
+            .expect("material registrado");
+        let c = material.base_color.to_srgba();
+        [c.red, c.green, c.blue, c.alpha]
+    }
+
+    #[test]
+    fn aplicar_sentido_reconstruye_vuelo_cinta_zonas_y_titulo() {
+        let corredor = Corredor::cargar();
+        let ruta_ida = perfil_ruta(&corredor, false);
+        let ruta_vuelta = perfil_ruta(&corredor, true);
+
+        let mut app = App::new();
+        app.insert_resource(corredor)
+            .insert_resource(Sentido::UtsAUis)
+            .insert_resource(Vuelo::nuevo(ruta_ida.clone()))
+            .init_resource::<Zonas>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, aplicar_sentido);
+
+        // Entidades como las crearía construir_escena.
+        let mundo = app.world_mut();
+        let cinta = mundo.spawn(CintaRuta).id();
+        let ventana = mundo.spawn(Window::default()).id();
+        let mut zonas = Zonas::default();
+        for (campus, color) in [
+            (&mut zonas.uts, Color::srgb(0.35, 0.83, 1.0)),
+            (&mut zonas.uis, Color::srgb(0.5, 0.9, 0.6)),
+        ] {
+            let (anillo, haz) = {
+                let mut materiales = mundo.resource_mut::<Assets<StandardMaterial>>();
+                let ma = materiales.add(StandardMaterial { base_color: color, ..default() });
+                let mh = materiales.add(StandardMaterial { base_color: color, ..default() });
+                (
+                    mundo.spawn(MeshMaterial3d(ma)).id(),
+                    mundo.spawn(MeshMaterial3d(mh)).id(),
+                )
+            };
+            *campus = Some((anillo, haz));
+        }
+        mundo.insert_resource(zonas);
+
+        // Primera actualización: aplica el sentido por defecto.
+        app.update();
+        let mundo = app.world();
+        assert_eq!(mundo.resource::<Vuelo>().ruta, ruta_ida);
+        assert!(mundo.entity(cinta).get::<Mesh3d>().is_some(), "cinta re-insertada");
+        let titulo = mundo.entity(ventana).get::<Window>().unwrap().title.clone();
+        assert!(titulo.contains("UTS → UIS"), "título: {titulo}");
+        let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UTS azul");
+        let [r, g, b, _] = color_de(&app, h);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "haz UTS azul");
+
+        // Voltear: el vuelo se reconstruye desde UIS, los colores se intercambian.
+        *app.world_mut().resource_mut::<Sentido>() = Sentido::UisAuts;
+        app.update();
+        let mundo = app.world();
+        assert_eq!(mundo.resource::<Vuelo>().ruta, ruta_vuelta);
+        let titulo = mundo.entity(ventana).get::<Window>().unwrap().title.clone();
+        assert!(titulo.contains("UIS → UTS"), "título: {titulo}");
+        let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "anillo UTS verde al invertir");
+        let [r, g, b, _] = color_de(&app, h);
+        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "haz UTS verde al invertir");
+        let (a, _) = mundo.resource::<Zonas>().uis.unwrap();
+        let [r, g, b, _] = color_de(&app, a);
+        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UIS azul al invertir");
     }
 }
