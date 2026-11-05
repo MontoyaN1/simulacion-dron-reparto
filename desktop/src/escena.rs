@@ -3,10 +3,13 @@
 
 use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::AnimationPlayer;
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::pbr::Atmosphere;
 use bevy::prelude::*;
+use bevy::render::alpha::AlphaMode;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::Face;
 use bevy::window::PrimaryWindow;
 use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
@@ -20,7 +23,7 @@ const LON_UIS: f64 = -73.1198652;
 const LAT_UIS: f64 = 7.1409311;
 const MG_LAT: f64 = 111_320.0;
 const PASO_MALLA: f64 = 25.0;
-const PASO_FONDO: f64 = 120.0;
+const PASO_FONDO: f64 = 100.0;
 const MARGEN_BBOX: f64 = 0.009;
 const ANCHO_LATERAL: f64 = 300.0;
 
@@ -29,17 +32,7 @@ pub struct EscenaPlugin;
 impl Plugin for EscenaPlugin {
     fn build(&self, app: &mut App) {
         let corredor = Corredor::cargar();
-        // Ruta con alturas referidas al suelo: con relieve real, un altitud de
-        // 50 m sobre el ancla dejaría al dron enterrado al llegar a la UIS.
-        let destino = corredor.desplazamiento;
-        let suelo_uts = corredor.agl(0.0, 0.0);
-        let suelo_uis = corredor.agl(destino[0], destino[1]);
-        let ruta = vec![
-            [0.0, 0.0, suelo_uts],
-            [0.0, 0.0, suelo_uts + ALTITUD_CRUCERO],
-            [destino[0], destino[1], suelo_uis + ALTITUD_CRUCERO],
-            [destino[0], destino[1], suelo_uis],
-        ];
+        let ruta = perfil_ruta(&corredor);
         // Relleno de cielo: sin él las caras a contraluz quedan en negro puro.
         // En Bevy 0.16 el ambiente es un recurso (o componente de cámara).
         app.insert_resource(AmbientLight {
@@ -53,8 +46,34 @@ impl Plugin for EscenaPlugin {
             .init_resource::<Camara>()
             .add_systems(Startup, construir_escena)
             .add_systems(FixedUpdate, avanzar_vuelo)
-            .add_systems(Update, (seguir_dron, animar_rotores, poner_icono));
+            .add_systems(
+                Update,
+                (entrada_camara, seguir_dron, animar_rotores, pulso_marcas, poner_icono),
+            );
     }
+}
+
+/** Ruta UTS->UIS con etapas verticales y un leve giro S. */
+fn perfil_ruta(corredor: &Corredor) -> Vec<[f64; 3]> {
+    let [dx, dn] = corredor.desplazamiento;
+    let suelo_uts = corredor.agl(0.0, 0.0);
+    let suelo_uis = corredor.agl(dx, dn);
+    let mut ruta = vec![
+        [0.0, 0.0, suelo_uts],
+        [0.0, 0.0, suelo_uts + ALTITUD_CRUCERO],
+    ];
+    let etapas = 14;
+    for k in 1..=etapas {
+        let along = corredor.largo * k as f64 / etapas as f64;
+        // Curva S suave: hasta ±20 m laterales, cero en los extremos.
+        let lateral = 20.0 * (std::f64::consts::TAU * along / corredor.largo).sin();
+        // Crucero a 50 m con dos etapas de altitud (±8 m) a lo largo.
+        let alt = ALTITUD_CRUCERO + 8.0 * (std::f64::consts::TAU * 2.0 * along / corredor.largo).sin();
+        let [este, norte] = corredor.punto(along, lateral);
+        ruta.push([este, norte, corredor.agl(este, norte) + alt]);
+    }
+    ruta.push([dx, dn, suelo_uis]);
+    ruta
 }
 
 /// Estado del vuelo: el motor avanza a paso fijo y el render interpola.
@@ -64,15 +83,20 @@ pub struct Vuelo {
     pub anterior: [f64; 3],
     pub actual: [f64; 3],
     pub pausado: bool,
+    pub inicio: [f64; 3],
+    pub ruta: Vec<[f64; 3]>,
 }
 
 impl Vuelo {
     fn nuevo(ruta: Vec<[f64; 3]>) -> Self {
+        let inicio = *ruta.first().unwrap_or(&[0.0; 3]);
         Vuelo {
-            motor: MotorVuelo::nuevo(ruta),
-            anterior: [0.0; 3],
-            actual: [0.0; 3],
+            motor: MotorVuelo::nuevo(ruta.clone()),
+            anterior: inicio,
+            actual: inicio,
             pausado: false,
+            inicio,
+            ruta,
         }
     }
 
@@ -86,14 +110,17 @@ impl Vuelo {
 
     pub fn reiniciar(&mut self) {
         self.motor.reiniciar();
-        self.anterior = [0.0; 3];
-        self.actual = [0.0; 3];
+        self.anterior = self.inicio;
+        self.actual = self.inicio;
         self.pausado = false;
     }
 }
 
 fn avanzar_vuelo(mut vuelo: ResMut<Vuelo>, tiempo: Res<Time>) {
     if vuelo.pausado {
+        // Congela la interpolación: con `anterior` caducado el dron oscila
+        // entre los dos últimos pasos mientras el reloj sigue corriendo.
+        vuelo.anterior = vuelo.actual;
         return;
     }
     vuelo.motor.iniciar();
@@ -349,13 +376,64 @@ fn enu_de(lat: f64, lon: f64) -> [f64; 2] {
 struct ColisionEdificios(Option<TriMesh>);
 
 #[derive(Resource)]
-struct Camara {
+pub struct Camara {
     pos: Vec3,
+    /// Orbita libre: el usuario se quedo la camara con el raton.
+    pub libre: bool,
+    azim: f32,
+    elev: f32,
+    dist: f32,
 }
 
 impl Default for Camara {
     fn default() -> Self {
-        Camara { pos: Vec3::new(0.0, 420.0, 2000.0) }
+        Camara { pos: Vec3::new(0.0, 420.0, 2000.0), libre: false, azim: 0.0, elev: 0.6, dist: 75.0 }
+    }
+}
+
+/** Orbita libre: arrastrar = girar, rueda = zoom, R = volver al dron. */
+fn entrada_camara(
+    mut camara: ResMut<Camara>,
+    drones: Query<&Transform, With<Dron>>,
+    mut rueda: EventReader<MouseWheel>,
+    mut raton: EventReader<MouseMotion>,
+    botones: Res<ButtonInput<MouseButton>>,
+    teclado: Res<ButtonInput<KeyCode>>,
+) {
+    if teclado.just_pressed(KeyCode::KeyR) {
+        camara.libre = false;
+        return;
+    }
+    let mut interacto = false;
+    while let Some(ev) = rueda.read().next() {
+        camara.dist = (camara.dist * (1.0 - ev.y * 0.08)).clamp(12.0, 900.0);
+        interacto = true;
+    }
+    if botones.pressed(MouseButton::Left) {
+        while let Some(ev) = raton.read().next() {
+            camara.azim -= ev.delta.x * 0.005;
+            camara.elev = (camara.elev + ev.delta.y * 0.005).clamp(0.06, 1.45);
+            interacto = true;
+        }
+    }
+    if interacto && !camara.libre {
+        // Adota el encuadre actual como punto de partida de la orbita.
+        if let Ok(dron) = drones.single() {
+            let rel = camara.pos - dron.translation;
+            let h = rel.length().max(1e-3);
+            camara.dist = h.clamp(12.0, 900.0);
+            camara.elev = (rel.y / h).asin().clamp(0.06, 1.45);
+            camara.azim = rel.z.atan2(rel.x);
+        }
+        camara.libre = true;
+    }
+}
+
+/// Pulsacion de los anillos de salida y llegada.
+fn pulso_marcas(tiempo: Res<Time>, mut zonas: Query<&mut Transform, With<ZonaMarcada>>) {
+    let s = 1.0 + 0.10 * (tiempo.elapsed_secs() * 2.2).sin();
+    for mut t in &mut zonas {
+        t.scale = Vec3::splat(s);
     }
 }
 
@@ -365,6 +443,7 @@ fn construir_escena(
     mut materiales: ResMut<Assets<StandardMaterial>>,
     server: Res<AssetServer>,
     corredor: Res<Corredor>,
+    vuelo: Res<Vuelo>,
     mut colision: ResMut<ColisionEdificios>,
 ) {
     // Sol: la DirectionalLight brilla según el +Z de su transform, así que hay
@@ -430,21 +509,192 @@ fn construir_escena(
             ));
         });
 
+    // Ruta pintada en escena: el piloto ve el trazado que sigue el dron.
+    commands.spawn((
+        Mesh3d(mallas.add(cinta_ruta(&vuelo.ruta))),
+        MeshMaterial3d(materiales.add(StandardMaterial {
+            unlit: true,
+            base_color: Color::srgba(0.35, 0.83, 1.0, 0.55),
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        })),
+    ));
+
+    // Anillos de salida (UTS) y llegada (UIS) con su haz vertical.
+    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], Color::srgb(0.35, 0.83, 1.0));
+    spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, Color::srgb(0.5, 0.9, 0.6));
+
+    // Capa de nubes: domo gigante a 20 km con textura horneada.
+    if std::path::Path::new("assets/nubes.png").exists() {
+        commands.spawn((
+            Mesh3d(mallas.add(domo_nubes(20_000.0, 64, 32))),
+            MeshMaterial3d(materiales.add(StandardMaterial {
+                unlit: true,
+                base_color_texture: Some(server.load("nubes.png")),
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: Some(Face::Front),
+                ..default()
+            })),
+            Transform::from_translation(Vec3::new(0.0, 0.0, 1_990.0)),
+        ));
+    }
+
     let (vista, objetivo) = vista_amplia(&corredor);
     commands.spawn((
+        // hdr: vista en buffer Rgba16Float; el cielo procedural (Bruneton)
+        // de Bevy 0.16 solo funciona sobre buffer HDR. En 0.16 el campo
+        // vive en la componente base Camera, no en Camera3d.
+        Camera { hdr: true, ..default() },
         Camera3d::default(),
         Msaa::Off,
-        // Bruma de distancia: da profundidad al corredor de 4 km.
-        DistanceFog {
-            color: Color::srgb(0.72, 0.78, 0.87),
-            falloff: FogFalloff::Linear { start: 900.0, end: 5_500.0 },
-            ..default()
-        },
-        Projection::Perspective(PerspectiveProjection { far: 15_000.0, ..default() }),
+        // Cielo procedural con sol (Bruneton): toma la luz de la
+        // DirectionalLight de la escena; la bruma fisica hace de bruma.
+        Atmosphere::default(),
+        Projection::Perspective(PerspectiveProjection { near: 0.5, far: 45_000.0, ..default() }),
         Transform::from_translation(vista).looking_at(objetivo, Vec3::Y),
     ));
-    commands.insert_resource(Camara { pos: vista });
+    commands.insert_resource(Camara { pos: vista, ..default() });
 }
+
+/** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m. */
+fn spawn_zona(
+    commands: &mut Commands,
+    mallas: &mut Assets<Mesh>,
+    materiales: &mut Assets<StandardMaterial>,
+    corredor: &Corredor,
+    pos_enu: [f64; 2],
+    color: Color,
+) {
+    let c = color.to_srgba();
+    let suelo = corredor.agl(pos_enu[0], pos_enu[1]) as f32;
+    let centro = Vec3::new(pos_enu[0] as f32, suelo + 0.3, pos_enu[1] as f32);
+    commands.spawn((
+        ZonaMarcada,
+        Mesh3d(mallas.add(anillo(7.0, 11.0, 48))),
+        MeshMaterial3d(materiales.add(StandardMaterial {
+            unlit: true,
+            base_color: Color::srgba(c.red, c.green, c.blue, 0.55),
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::from_translation(centro),
+    ));
+    commands.spawn((
+        Mesh3d(mallas.add(haz_luz(centro, 90.0))),
+        MeshMaterial3d(materiales.add(StandardMaterial {
+            unlit: true,
+            base_color: Color::srgba(c.red, c.green, c.blue, 0.22),
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        })),
+    ));
+}
+
+/** Cinta de 1,8 m de ancho sobre la ruta, para verla de lejos. */
+fn cinta_ruta(ruta: &[[f64; 3]]) -> Mesh {
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(ruta.len() * 2);
+    let (mut lx, mut lz) = (1.0_f64, 0.0_f64);
+    for (i, p) in ruta.iter().enumerate() {
+        if let Some(q) = ruta.get(i + 1) {
+            let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+            let m = dx.hypot(dz);
+            if m > 1e-3 {
+                (lx, lz) = (-dz / m, dx / m);
+            }
+        }
+        const W: f64 = 0.9;
+        pos.push([(p[0] + lx * W) as f32, p[2] as f32 + 0.4, (p[1] + lz * W) as f32]);
+        pos.push([(p[0] - lx * W) as f32, p[2] as f32 + 0.4, (p[1] - lz * W) as f32]);
+    }
+    let mut indices = Vec::with_capacity(ruta.len().saturating_sub(1) * 6);
+    for i in 0..ruta.len().saturating_sub(1) {
+        let a = (i * 2) as u32;
+        indices.extend_from_slice(&[a, a + 2, a + 1, a + 1, a + 2, a + 3]);
+    }
+    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    malla.insert_indices(Indices::U32(indices));
+    malla
+}
+
+/** Anillo (anillo = corona) horizontal en el origen, listo para mover. */
+fn anillo(interior: f32, exterior: f32, segmentos: u32) -> Mesh {
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(((segmentos + 1) * 2) as usize);
+    let mut indices = Vec::with_capacity(segmentos as usize * 6);
+    for i in 0..=segmentos {
+        let t = i as f32 / segmentos as f32 * std::f32::consts::TAU;
+        let (cx, cz) = (t.cos(), t.sin());
+        pos.push([cx * exterior, 0.0, cz * exterior]);
+        pos.push([cx * interior, 0.0, cz * interior]);
+    }
+    for i in 0..segmentos {
+        let a = i * 2;
+        indices.extend_from_slice(&[a, a + 2, a + 1, a + 1, a + 2, a + 3]);
+    }
+    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    malla.insert_indices(Indices::U32(indices));
+    malla
+}
+
+/** Haz de luz: dos planos cruzados desde el suelo hasta `alto`. */
+fn haz_luz(c: Vec3, alto: f32) -> Mesh {
+    let (y0, y1, w) = (c.y - 0.3, c.y + alto, 1.1_f32);
+    let pos: [[f32; 3]; 8] = [
+        [c.x - w, y0, c.z],
+        [c.x + w, y0, c.z],
+        [c.x + w, y1, c.z],
+        [c.x - w, y1, c.z],
+        [c.x, y0, c.z - w],
+        [c.x, y0, c.z + w],
+        [c.x, y1, c.z + w],
+        [c.x, y1, c.z - w],
+    ];
+    let indices = [0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.to_vec());
+    malla.insert_indices(Indices::U32(indices.to_vec()));
+    malla
+}
+
+/** Domo UV para ver el cielo y las nubes por dentro. */
+fn domo_nubes(radio: f32, sectores: u32, capas: u32) -> Mesh {
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity((sectores + 1) as usize * (capas + 1) as usize);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((sectores + 1) as usize * (capas + 1) as usize);
+    for i in 0..=capas {
+        let v = i as f32 / capas as f32;
+        let theta = v * std::f32::consts::PI;
+        let (st, ct) = (theta.sin(), theta.cos());
+        for j in 0..=sectores {
+            let u = j as f32 / sectores as f32;
+            let phi = u * std::f32::consts::TAU;
+            pos.push([st * phi.cos() * radio, ct * radio, st * phi.sin() * radio]);
+            uvs.push([u, v]);
+        }
+    }
+    let ancho = (sectores + 1) as u32;
+    let mut indices = Vec::with_capacity(sectores as usize * capas as usize * 6);
+    for i in 0..capas {
+        for j in 0..sectores {
+            let a = i * ancho + j;
+            let b = a + 1;
+            let c = a + ancho;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    malla.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    malla.insert_indices(Indices::U32(indices));
+    malla
+}
+
+#[derive(Component)]
+struct ZonaMarcada;
 
 /// Plano de presentación: el corredor en perspectiva, desde atrás y a la izquierda.
 fn vista_amplia(corredor: &Corredor) -> (Vec3, Vec3) {
@@ -752,6 +1002,28 @@ fn seguir_dron(
     let Ok(mut trasform_camara) = camaras.single_mut() else {
         return;
     };
+
+    if camara.libre {
+        // Orbita libre alrededor del dron, con el mismo recorte de colision.
+        let offset = Vec3::new(
+            camara.azim.sin() * camara.elev.cos(),
+            camara.elev.sin(),
+            camara.azim.cos() * camara.elev.cos(),
+        ) * camara.dist;
+        let desde = pos + Vec3::Y * 1.2;
+        let candidato = pos + offset;
+        let mut elegido = candidato;
+        if let Some(toi) = golpe_de(&colision.0, desde, candidato) {
+            elegido = desde + (candidato - desde).normalize() * ((toi as f32 - 2.0).max(1.5));
+        }
+        let suavizado = 1.0 - (-10.0 * tiempo.delta_secs()).exp();
+        camara.pos = camara.pos.lerp(elegido, suavizado);
+        let suelo = corredor.agl(camara.pos.x as f64, camara.pos.z as f64) as f32;
+        camara.pos.y = camara.pos.y.max(suelo + 4.0);
+        trasform_camara.translation = camara.pos;
+        trasform_camara.look_at(pos + Vec3::Y * 1.5, Vec3::Y);
+        return;
+    }
 
     let t = vuelo.motor.telemetria().t;
     if t < 2.4 {

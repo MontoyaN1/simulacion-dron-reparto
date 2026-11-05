@@ -20,8 +20,8 @@ TILE = 256
 SALIDA = os.path.join(os.path.dirname(__file__), "..", "assets", "mapa-amplio.jpg")
 
 # Área en el marco del corredor: desde antes de la UTS hasta pasar la UIS.
-ALONG_MIN, ALONG_MAX = -1500.0, 5500.0
-LATERAL_MAX = 3000.0
+ALONG_MIN, ALONG_MAX = -3000.0, 7000.0
+LATERAL_MAX = 5000.0
 
 
 def ecef(lat, lon):

@@ -34,6 +34,7 @@ hay cuello de botella de CPU ni de GPU: el terreno son dos mallas (franja de
 | Edificios OSM (718) | `assets/edificios.geojson` | OpenStreetMap |
 | Altura de suelo por edificio | `assets/alturas-edificios.json` | Cesium ion |
 | Dron (fuselaje + rotores animados) | `assets/corredor-dron.glb` | generado para el proyecto |
+| Capa de nubes del domo de cielo | `assets/nubes.png` | ruido de valor FBM (`tools/bake_nubes.py`) |
 | Icono de la ventana | `assets/icono.png` | generado con ImageMagick |
 
 Las cajas geodésicas de las ortofotos (`*-caja.json`) las usan las UV del
@@ -42,10 +43,11 @@ terreno: si se re-hornea una imagen hay que volver a generarlas.
 ## Re-horneado
 
 ```bash
-python3 tools/bake_terreno.py --paso 50 --margen-along 1500 --margen-lateral 3000 \
+python3 tools/bake_terreno.py --paso 50 --margen-along 3000 --margen-lateral 5000 \
         --salida alturas-terreno-amplio.json
 python3 tools/bake_mapa.py        # mosaico amplio + caja
 python3 tools/bake_corredor.py    # franja z18 + caja
+python3 tools/bake_nubes.py       # nubes del cielo (offline)
 ```
 
 `bake_terreno.py` usa OpenTopoData (sin clave, 1 petición/s, 100 puntos por
@@ -61,6 +63,18 @@ Esri World Imagery.
 - **Temblor**: el motor de vuelo avanza a paso fijo de 30 Hz y el render
   interpola entre el paso anterior y el actual, así que la imagen nunca da
   tirones aunque el cuadro no cuadre con los 30 Hz.
+- **Cielo**: `Atmosphere` (Bruneton) sobre la cámara con `hdr: true` (en 0.16
+  el campo vive en la componente base `Camera`); el sol lo toma de la
+  `DirectionalLight` y una cúpula de 20 km con `nubes.png` aporta las nubes.
+- **Cámara**: persecución automática; arrastrar orbita libre alrededor del
+  dron, la rueda hace zoom y `R` vuelve a seguirlo. Siempre con recorte por
+  raycast contra los edificios.
+- **Ruta**: no es una regla: despegue, crucero con dos etapas de altitud
+  (±8 m) y una curva S de ±20 m laterales, y descenso final. La ruta se pinta
+  en escena (cinta de 1,8 m) y hay anillos pulsantes en UTS y UIS con haz
+  vertical.
+- **Texturas**: anisotropía 16 en el sampler por defecto; sin ella la
+  ortofoto se ve en bloques al verla de canto.
 - **Iluminación**: sol direccional inclinado + relleno de ambiente. En Bevy
   0.16 el `AmbientLight` es un recurso (o componente de cámara), no una entidad.
 - **HUD**: egui (panel superior con estado y controles, panel inferior con

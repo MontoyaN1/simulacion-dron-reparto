@@ -109,7 +109,7 @@ impl MotorVuelo {
 
     pub fn reiniciar(&mut self) {
         self.rumbog = 0.0;
-        self.pos = [0.0; 3];
+        self.pos = *self.ruta.first().unwrap_or(&[0.0; 3]);
         self.vel = [0.0; 3];
         self.t = 0.0;
         self.wp = 0;
