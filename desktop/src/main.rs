@@ -10,7 +10,7 @@ mod escena;
 mod matematica;
 mod nucleo;
 
-use escena::{Camara, Corredor, EscenaPlugin, Vuelo};
+use escena::{Camara, Corredor, EscenaPlugin, VelSim, Vuelo};
 use matematica::{vec3, LiveAlgebra, Mat3};
 use nucleo::{Fase, MuestraTelemetria};
 
@@ -18,6 +18,8 @@ const FONDO: egui::Color32 = egui::Color32::from_rgb(11, 18, 32);
 const ACENTO: egui::Color32 = egui::Color32::from_rgb(56, 189, 248);
 const TEXTO: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);
 const TENUE: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);
+const ELEVADO: egui::Color32 = egui::Color32::from_rgb(19, 28, 44);
+const AMBAR: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);
 // Mismo sistema de color que la versión web (valores pre-multiplicados).
 const TARJETA: egui::Color32 = egui::Color32::from_rgba_premultiplied(13, 22, 34, 209);
 const BORDE: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 26, 30, 41);
@@ -79,12 +81,58 @@ fn nombre_fase(fase: Fase) -> &'static str {
     }
 }
 
-fn metrica(ui: &mut egui::Ui, titulo: &str, valor: String) {
+/// Color de la fase: gris en tierra, ámbar en transiciones, verde en crucero.
+fn fase_color(fase: Fase) -> egui::Color32 {
+    match fase {
+        Fase::Inactivo => TENUE,
+        Fase::Despegue | Fase::Descenso => AMBAR,
+        Fase::Crucero => VERDE,
+        Fase::Entregado => ACENTO,
+    }
+}
+
+/// Marca de la casa: el cuadricóptero de la versión web, dibujado.
+fn marca_dron(ui: &mut egui::Ui, tam: f32, color: egui::Color32) {
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(tam, tam), egui::Sense::hover());
+    let p = ui.painter();
+    let pt = |x: f32, y: f32| rect.left_top() + egui::vec2(x * tam / 24.0, y * tam / 24.0);
+    let trazo = egui::Stroke::new(1.6 * tam / 20.0, color);
+    for (x, y) in [(5.0, 5.0), (19.0, 5.0), (5.0, 19.0), (19.0, 19.0)] {
+        p.circle_stroke(pt(x, y), 2.6 * tam / 20.0, trazo);
+    }
+    p.line_segment([pt(7.0, 7.0), pt(17.0, 17.0)], trazo);
+    p.line_segment([pt(17.0, 7.0), pt(7.0, 17.0)], trazo);
+    p.rect_filled(
+        egui::Rect::from_two_pos(pt(10.4, 10.4), pt(13.6, 13.6)),
+        0.8 * tam / 20.0,
+        color,
+    );
+}
+
+/// Botón con los tokens del proyecto; `activo` lo rellena del acento.
+fn boton(ui: &mut egui::Ui, texto: &str, activo: bool) -> bool {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(texto)
+                .color(if activo { FONDO } else { TEXTO })
+                .monospace()
+                .size(11.5),
+        )
+        .fill(if activo { ACENTO } else { ELEVADO })
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if activo { ACENTO } else { BORDE },
+        ))
+        .corner_radius(4.0),
+    )
+    .clicked()
+}
+
+fn metrica(ui: &mut egui::Ui, titulo: &str, valor: &str) {
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(titulo).color(TENUE).size(10.0).strong());
         ui.label(egui::RichText::new(valor).color(TEXTO).monospace().size(20.0));
     });
-    ui.add_space(26.0);
 }
 
 /// Datos fijos de la ruta y del marco ENU (se calculan una sola vez).
@@ -137,6 +185,7 @@ fn hud(
     mut vuelo: ResMut<Vuelo>,
     corredor: Res<Corredor>,
     mut camara: ResMut<Camara>,
+    mut vel: ResMut<VelSim>,
     tiempo: Res<Time>,
     mut datos: Local<Option<DatosRuta>>,
     mut abierto: Local<Option<bool>>,
@@ -155,45 +204,78 @@ fn hud(
             .min_width(320.0)
             .max_width(560.0)
             .resizable(true)
-            .frame(egui::Frame::NONE.fill(FONDO))
+            .frame(egui::Frame::NONE.fill(FONDO).stroke(egui::Stroke::new(1.0_f32, BORDE)))
             .show(ctx, |ui| {
                 panel_modelo(ui, &m, datos.get_or_insert_with(|| datos_ruta(&corredor, &vuelo)))
             });
     }
 
     egui::TopBottomPanel::top("barra")
-        .frame(egui::Frame::NONE.fill(FONDO).inner_margin(egui::Margin::symmetric(16, 9)))
+        .frame(
+            egui::Frame::NONE
+                .fill(FONDO)
+                .stroke(egui::Stroke::new(1.0_f32, BORDE))
+                .inner_margin(egui::Margin::symmetric(16, 9)),
+        )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("DRON · UTS → UIS").color(TEXTO).strong().size(16.0));
+                marca_dron(ui, 20.0, TEXTO);
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new(nombre_fase(m.fase)).color(ACENTO).monospace().size(12.0));
+                ui.label(
+                    egui::RichText::new("DRON · UTS → UIS")
+                        .color(TEXTO)
+                        .strong()
+                        .size(16.0),
+                );
+                ui.add_space(10.0);
+                // Chip de fase: punto + etiqueta, como la versión web.
+                let fc = fase_color(m.fase);
+                ui.horizontal(|ui| {
+                    let (_id, r) = ui.allocate_space(egui::vec2(8.0, 14.0));
+                    ui.painter()
+                        .circle_filled(egui::pos2(r.min.x + 4.0, r.min.y + 7.0), 3.0, fc);
+                    ui.label(
+                        egui::RichText::new(nombre_fase(m.fase)).color(fc).monospace().size(12.0),
+                    );
+                });
                 ui.add_space(14.0);
                 if camara.libre {
                     ui.label(
                         egui::RichText::new("CÁMARA LIBRE")
-                            .color(egui::Color32::from_rgb(251, 191, 36))
+                            .color(AMBAR)
                             .monospace()
                             .size(12.0),
                     );
-                    if ui.button("SEGUIR DRON").clicked() {
+                    if boton(ui, "SEGUIR DRON", false) {
                         camara.libre = false;
+                    }
+                }
+                // Velocidad de la simulación.
+                ui.add_space(18.0);
+                ui.label(egui::RichText::new("SIM").color(TENUE).strong().size(10.0));
+                ui.add_space(5.0);
+                for v in [1u32, 2, 4, 8, 16] {
+                    if boton(ui, &format!("{v}×"), vel.0 == v) {
+                        vel.0 = v;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new(format!("{:.0} fps", 1.0 / tiempo.delta_secs().max(1e-4)))
-                            .color(TENUE)
-                            .monospace(),
+                        egui::RichText::new(format!(
+                            "{:.0} fps",
+                            1.0 / tiempo.delta_secs().max(1e-4)
+                        ))
+                        .color(TENUE)
+                        .monospace(),
                     );
                     let etiqueta = if vuelo.pausado { "Reanudar" } else { "Pausar" };
-                    if ui.button(etiqueta).clicked() {
+                    if boton(ui, etiqueta, false) {
                         vuelo.pausado = !vuelo.pausado;
                     }
-                    if ui.button("Reiniciar").clicked() {
+                    if boton(ui, "Reiniciar", false) {
                         vuelo.reiniciar();
                     }
-                    if ui.button("MODELO").clicked() {
+                    if boton(ui, "MODELO", panel_abierto) {
                         toggle = true;
                     }
                 });
@@ -203,22 +285,39 @@ fn hud(
         *abierto = Some(!panel_abierto);
     }
 
+    let metricas = [
+        ("ALTITUD", format!("{sobre_suelo:.1} m")),
+        ("VELOCIDAD", format!("{:.1} m/s", m.velocidad_total)),
+        ("BATERÍA", format!("{:.0} %", m.bateria_porcentaje)),
+        ("RESTANTE", format!("{:.0} m", m.dist_restante)),
+        ("RUMBO", format!("{:.0}°", m.rumbo_grados)),
+        ("TIEMPO", format!("{:.1} s", m.t)),
+        ("RECORRIDO", format!("{:.0} m", m.dist_recorrida)),
+    ];
     egui::TopBottomPanel::bottom("telemetria")
-        .frame(egui::Frame::NONE.fill(FONDO).inner_margin(egui::Margin::symmetric(16, 10)))
+        .frame(
+            egui::Frame::NONE
+                .fill(FONDO)
+                .stroke(egui::Stroke::new(1.0_f32, BORDE))
+                .inner_margin(egui::Margin::symmetric(16, 10)),
+        )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                metrica(ui, "ALTITUD", format!("{sobre_suelo:.1} m"));
-                metrica(ui, "VELOCIDAD", format!("{:.1} m/s", m.velocidad_total));
-                metrica(ui, "BATERÍA", format!("{:.0} %", m.bateria_porcentaje));
-                metrica(ui, "RESTANTE", format!("{:.0} m", m.dist_restante));
-                metrica(ui, "RUMBO", format!("{:.0}°", m.rumbo_grados));
-                metrica(ui, "TIEMPO", format!("{:.1} s", m.t));
-                metrica(ui, "RECORRIDO", format!("{:.0} m", m.dist_recorrida));
+                for (i, (clave, valor)) in metricas.iter().enumerate() {
+                    if i > 0 {
+                        ui.add(egui::Separator::default().vertical());
+                        ui.add_space(16.0);
+                    }
+                    metrica(ui, clave, valor);
+                    ui.add_space(18.0);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new("arrastra: orbitar · rueda: zoom · R: seguir dron · M: modelo")
-                            .color(TENUE)
-                            .size(11.0),
+                        egui::RichText::new(
+                            "arrastra: orbitar · rueda: zoom · R: seguir dron · M: modelo",
+                        )
+                        .color(TENUE)
+                        .size(11.0),
                     );
                 });
                 ui.vertical(|ui| {
@@ -240,7 +339,12 @@ fn hud(
 fn panel_modelo(ui: &mut egui::Ui, m: &MuestraTelemetria, d: &DatosRuta) {
     ui.add_space(12.0);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("MODELO MATEMÁTICO").color(TEXTO).strong().size(14.0));
+        ui.label(
+            egui::RichText::new("MODELO MATEMÁTICO")
+                .color(TEXTO)
+                .strong()
+                .size(14.0),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             chip(ui, "EN VIVO", Some(CIAN_FONDO), CIAN_BORDE, CIAN_TEXTO);
         });
@@ -392,7 +496,8 @@ fn tema(ui: &mut egui::Ui, nombre: &str, detalle: &str, valor: &str) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (_id, r) = ui.allocate_space(egui::vec2(6.0, 34.0));
-                ui.painter().circle_filled(egui::pos2(r.min.x + 3.0, r.min.y + 3.0), 3.0, VERDE);
+                ui.painter()
+                    .circle_filled(egui::pos2(r.min.x + 3.0, r.min.y + 3.0), 3.0, VERDE);
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(nombre).color(TEXTO).size(11.5));
@@ -484,15 +589,19 @@ fn tarjeta_temas(ui: &mut egui::Ui, a: &LiveAlgebra) {
     });
 }
 
-/** Con `FPS=1` imprime el fps medio cada 5 s (para medir sin mirar el HUD). */
-fn fps_promedio(tiempo: Res<Time>, mut acum: Local<f32>, mut n: Local<u32>) {
+/** Con `FPS=1` imprime el fps medio y el tiempo de simulación cada 5 s. */
+fn fps_promedio(tiempo: Res<Time>, vuelo: Res<Vuelo>, mut acum: Local<f32>, mut n: Local<u32>) {
     if std::env::var("FPS").is_err() {
         return;
     }
     *acum += tiempo.delta_secs();
     *n += 1;
     if *acum >= 5.0 {
-        println!("fps prom {0:.1}", *n as f32 / *acum);
+        println!(
+            "fps prom {0:.1} · t {1:.0} s",
+            *n as f32 / *acum,
+            vuelo.motor.telemetria().t
+        );
         *acum = 0.0;
         *n = 0;
     }

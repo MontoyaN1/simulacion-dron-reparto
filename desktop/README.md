@@ -88,8 +88,10 @@ Esri World Imagery.
   ortofoto se ve en bloques al verla de canto.
 - **Iluminación**: sol direccional inclinado + relleno de ambiente. En Bevy
   0.16 el `AmbientLight` es un recurso (o componente de cámara), no una entidad.
-- **HUD**: egui (panel superior con estado y controles, panel inferior con
-  telemetría y progreso del corredor).
+- **HUD**: egui (panel superior con estado, controles y velocidad de la
+  simulación 1×–16×, panel inferior con telemetría y progreso del corredor).
+  La rueda y el arrastre sobre cualquier zona del HUD no mueven la cámara
+  (el panel lateral se desplaza sin hacer zoom).
 - **Modelo matemático**: panel lateral colapsable (`M` o botón `MODELO`) que
   replica la sección de la versión web con los mismos datos en vivo:
   `Ruta real` (distancia, rumbo, escala académica, destino académico, edificios

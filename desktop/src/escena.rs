@@ -11,6 +11,7 @@ use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::Face;
 use bevy::window::PrimaryWindow;
+use bevy_egui::EguiContexts;
 use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
 use parry3d_f64::shape::TriMesh;
@@ -47,6 +48,7 @@ impl Plugin for EscenaPlugin {
             .insert_resource(corredor)
             .init_resource::<ColisionEdificios>()
             .init_resource::<Camara>()
+            .init_resource::<VelSim>()
             .add_systems(Startup, construir_escena)
             .add_systems(FixedUpdate, avanzar_vuelo)
             .add_systems(
@@ -126,7 +128,22 @@ impl Vuelo {
     }
 }
 
-fn avanzar_vuelo(mut vuelo: ResMut<Vuelo>, tiempo: Res<Time>) {
+/// Multiplicador de velocidad de la simulación (1, 2, 4, 8 o 16).
+#[derive(Resource)]
+pub struct VelSim(pub u32);
+
+impl Default for VelSim {
+    fn default() -> Self {
+        // SIM_VEL permite verificar la velocidad sin tocar la UI.
+        let v = std::env::var("SIM_VEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        VelSim(v.max(1))
+    }
+}
+
+fn avanzar_vuelo(mut vuelo: ResMut<Vuelo>, vel: Res<VelSim>, tiempo: Res<Time>) {
     if vuelo.pausado {
         // Congela la interpolación: con `anterior` caducado el dron oscila
         // entre los dos últimos pasos mientras el reloj sigue corriendo.
@@ -135,7 +152,11 @@ fn avanzar_vuelo(mut vuelo: ResMut<Vuelo>, tiempo: Res<Time>) {
     }
     vuelo.motor.iniciar();
     vuelo.anterior = vuelo.actual;
-    vuelo.motor.actualizar(tiempo.delta_secs_f64());
+    let dt = tiempo.delta_secs_f64();
+    // Subpasos del paso fijo: la trayectoria es idéntica a correr más rápido.
+    for _ in 0..vel.0.max(1) {
+        vuelo.motor.actualizar(dt);
+    }
     vuelo.actual = vuelo.motor.telemetria().posicion;
 }
 
@@ -427,9 +448,15 @@ fn entrada_camara(
     mut raton: EventReader<MouseMotion>,
     botones: Res<ButtonInput<MouseButton>>,
     teclado: Res<ButtonInput<KeyCode>>,
+    mut egui: EguiContexts,
 ) {
     if teclado.just_pressed(KeyCode::KeyR) {
         camara.libre = false;
+        return;
+    }
+    // Sobre el panel (o la barra) la rueda y el arrastre son de la UI, no
+    // de la cámara: sin esto, hacer scroll en el panel también zoom.
+    if egui.ctx_mut().is_ok_and(|c| c.is_pointer_over_area()) {
         return;
     }
     let mut interacto = false;
