@@ -86,6 +86,13 @@ Esri World Imagery.
   (±8 m) y una curva S de ±20 m laterales, y descenso final. La ruta se pinta
   en escena (cinta de 1,8 m) y hay anillos pulsantes en UTS y UIS con haz
   vertical.
+- **Sentido reversible**: botón `Sentido: …` en la barra superior (o tecla
+  `T`) voltea la ruta en caliente: reconstruye el vuelo desde el nuevo origen,
+  repinta la cinta, intercambia colores de anillos (azul = origen, verde =
+  llegada) y el panel matemático recalcula solo lo direccional (rumbo ≈ +180°,
+  destino académico ≈ (0,0) —el marco ENU académico sigue con origen en la
+  UTS—, dirección y distancia). El motor, las fases, la telemetría, la
+  colisión y la cámara son agnósticos al sentido.
 - **Dron con vida**: la rotación del fuselaje se calcula cada frame con las
   mismas convenciones que el cliente de referencia (euler XYZ sobre la base
   -π/2/π): rumbo real, cabeceo proporcional a la velocidad y al ascenso,

@@ -221,6 +221,9 @@ fn hud(
 
     let panel_abierto = abierto.unwrap_or(true);
     let mut toggle = ctx.input(|i| i.key_pressed(egui::Key::M));
+    if ctx.input(|i| i.key_pressed(egui::Key::T)) {
+        *sentido = sentido.invertir();
+    }
 
     if panel_abierto {
         egui::SidePanel::left("modelo")
@@ -338,15 +341,6 @@ fn hud(
                     metrica(ui, clave, valor);
                     ui.add_space(18.0);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "arrastra: orbitar · rueda: zoom · R: seguir dron · M: modelo",
-                        )
-                        .color(TENUE)
-                        .size(11.0),
-                    );
-                });
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
                     ui.add(
@@ -355,6 +349,18 @@ fn hud(
                             .fill(ACENTO)
                             .text(format!("{:.0} % del corredor", m.progreso * 100.0)),
                     );
+                    // Ayuda de teclas bajo la barra y alineada a la derecha:
+                    // en la fila de métricas se montaba sobre RECORRIDO.
+                    for linea in [
+                        "arrastra: orbitar · rueda: zoom",
+                        "R: seguir dron · M: modelo · T: sentido",
+                    ] {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(linea).color(TENUE).size(9.5),
+                            );
+                        });
+                    }
                 });
             });
             ui.add_space(2.0);

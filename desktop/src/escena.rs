@@ -555,6 +555,12 @@ fn aplicar_sentido(
     let invertida = *sentido == Sentido::UisAuts;
     let ruta = perfil_ruta(&corredor, invertida);
     *vuelo = Vuelo::nuevo(ruta.clone());
+    println!(
+        "Sentido: {} · vuelo reiniciado en ({:.0}, {:.0})",
+        sentido.nombre(),
+        vuelo.motor.telemetria().posicion[0],
+        vuelo.motor.telemetria().posicion[1],
+    );
     if let Ok(cinta) = cintas.single() {
         commands.entity(cinta).insert(Mesh3d(mallas.add(cinta_ruta(&ruta))));
     }
