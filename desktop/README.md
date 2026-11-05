@@ -96,8 +96,11 @@ Esri World Imagery.
 - **Dron con vida**: la rotación del fuselaje se calcula cada frame con las
   mismas convenciones que el cliente de referencia (euler XYZ sobre la base
   -π/2/π): rumbo real, cabeceo proporcional a la velocidad y al ascenso,
-  alabeo en las curvas y vaiven de hover; los rotores giran a 4× el ciclo del
-  glTF (~25 rad/s).
+  alabeo en las curvas y vaiven de hover. Los rotores giran por código (Bevy
+  0.16 no evalúa animaciones de glTF embebidas en escenas) con régimen
+  variable (4.5 + 1.4·v, máx 14 rev/s), rampa de arranque/aterrizaje y giro
+  alternado por motor; el estrobo trasero hace doble destello cada segundo.
+  La animación embebida del GLB se conserva para la web (Cesium la reproduce).
 - **Texturas**: anisotropía 16 en el sampler por defecto; sin ella la
   ortofoto se ve en bloques al verla de canto.
 - **Iluminación**: sol direccional inclinado + relleno de ambiente. En Bevy

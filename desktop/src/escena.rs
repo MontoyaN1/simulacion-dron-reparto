@@ -1,8 +1,7 @@
 //! Escena 3D del corredor UTS→UIS: ortofoto horneada, 718 edificios OSM,
 //! dron y cámara perseguidora con colisión contra los edificios.
 
-use bevy::animation::graph::AnimationNodeIndex;
-use bevy::animation::AnimationPlayer;
+use bevy::ecs::name::Name;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::pbr::Atmosphere;
 use bevy::prelude::*;
@@ -63,6 +62,7 @@ impl Plugin for EscenaPlugin {
                     seguir_dron,
                     animar_dron,
                     animar_rotores,
+                    parpadear_estrobo,
                     pulso_marcas,
                     poner_icono,
                 ),
@@ -2038,13 +2038,88 @@ fn animar_dron(
     }
 }
 
-fn animar_rotores(mut jugadores: Query<&mut AnimationPlayer>, mut iniciado: Local<bool>) {
-    if *iniciado {
-        return;
+/// Régimen objetivo de los rotores (rev/s). En tierra, 0 — se ve el arranque
+/// y el apagado; en el aire, paridad con la referencia web: 4.5 + 1.4·v con
+/// techo de 14.
+fn rpm_objetivo(fase: Fase, vel_h: f64) -> f32 {
+    if matches!(fase, Fase::Inactivo | Fase::Entregado) {
+        0.0
+    } else {
+        (4.5 + 1.4 * vel_h).min(14.0) as f32
     }
-    if let Some(mut jugador) = jugadores.iter_mut().next() {
-        jugador.play(AnimationNodeIndex::new(0)).repeat().set_speed(4.0);
-        *iniciado = true;
+}
+
+/// Sentido de giro por motor (configuración X): igual al del generador del GLB.
+fn dir_rotor(nodo: usize) -> f32 {
+    if nodo % 2 == 1 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+/// Destello doble del estrobo: fase del segundo en [0, 1).
+fn estrobo_visible(fase_segundo: f64) -> bool {
+    fase_segundo < 0.06 || (fase_segundo >= 0.15 && fase_segundo < 0.21)
+}
+
+/**
+ * Giro de los rotores por código. La animación embebida del GLB no se evalúa
+ * en Bevy 0.16 (el loader de glTF no cablea un AnimationGraph a la escena;
+ * solo Cesium la reproduce), así que aquí giramos los nodos Rotor1..4 del GLB
+ * directamente: régimen variable con la velocidad, rampa de arranque/aterrizaje
+ * y giro alternado por motor.
+ */
+fn animar_rotores(
+    tiempo: Res<Time>,
+    vuelo: Res<Vuelo>,
+    mut rotores: Query<(&mut Transform, &Name)>,
+    mut estado: Local<(f32, [f32; 4], bool)>,
+) {
+    let m = vuelo.motor.telemetria();
+    let vel_h = (m.vel[0].powi(2) + m.vel[1].powi(2)).sqrt();
+    let objetivo = rpm_objetivo(m.fase, vel_h);
+    let dt = tiempo.delta_secs_f64().min(0.1);
+    let (rpm, angulos, informado) = &mut *estado;
+    let rampa = 1.0 - (-dt / 0.4).exp();
+    *rpm += (objetivo - *rpm) * rampa as f32;
+    if !*informado && *rpm > 1.0 {
+        println!("rotores: régimen {:.1} rev/s", *rpm);
+        *informado = true;
+    }
+    let giro = *rpm * std::f32::consts::TAU * dt as f32;
+    for (mut tras, nombre) in &mut rotores {
+        let Some(n) = nombre
+            .as_str()
+            .strip_prefix("Rotor")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if !(1..=4).contains(&n) {
+            continue;
+        }
+        angulos[n - 1] = (angulos[n - 1] + dir_rotor(n) * giro) % std::f32::consts::TAU;
+        tras.rotation = Quat::from_rotation_z(angulos[n - 1]);
+    }
+}
+
+/// Estrobo trasero (nodo "Strobe" del GLB): doble destello cada segundo.
+fn parpadear_estrobo(
+    tiempo: Res<Time>,
+    mut nodos: Query<(&mut Visibility, &Name)>,
+    mut fase: Local<f64>,
+) {
+    *fase += tiempo.delta_secs_f64().min(0.1);
+    let encendido = estrobo_visible(*fase % 1.0);
+    for (mut vis, nombre) in &mut nodos {
+        if nombre.as_str() == "Strobe" {
+            *vis = if encendido {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
     }
 }
 
@@ -2287,5 +2362,182 @@ mod pruebas_sentido {
         let (a, _) = mundo.resource::<Zonas>().uis.unwrap();
         let [r, g, b, _] = color_de(&app, a);
         assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UIS azul al invertir");
+    }
+}
+
+#[cfg(test)]
+mod pruebas_rotores {
+    use super::*;
+    use bevy::asset::LoadState;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    #[test]
+    fn rpm_objetivo_es_cero_en_tierra_y_sube_con_la_velocidad() {
+        assert_eq!(rpm_objetivo(Fase::Inactivo, 12.0), 0.0);
+        assert_eq!(rpm_objetivo(Fase::Entregado, 12.0), 0.0);
+        assert!((rpm_objetivo(Fase::Despegue, 0.0) - 4.5).abs() < 1e-6);
+        assert!((rpm_objetivo(Fase::Despegue, 5.0) - 11.5).abs() < 1e-6);
+        assert!((rpm_objetivo(Fase::Crucero, 2.0) - 7.3).abs() < 1e-6);
+        assert!((rpm_objetivo(Fase::Crucero, 100.0) - 14.0).abs() < 1e-6);
+        assert!((rpm_objetivo(Fase::Descenso, 4.0) - 10.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn direccion_de_rotor_alterna_como_en_el_generador() {
+        assert_eq!(dir_rotor(1), 1.0);
+        assert_eq!(dir_rotor(2), -1.0);
+        assert_eq!(dir_rotor(3), 1.0);
+        assert_eq!(dir_rotor(4), -1.0);
+    }
+
+    #[test]
+    fn estrobo_hace_doble_destello_por_segundo() {
+        assert!(estrobo_visible(0.0));
+        assert!(estrobo_visible(0.05));
+        assert!(!estrobo_visible(0.1));
+        assert!(!estrobo_visible(0.14));
+        assert!(estrobo_visible(0.16));
+        assert!(estrobo_visible(0.2));
+        assert!(!estrobo_visible(0.25));
+        assert!(!estrobo_visible(0.99));
+    }
+
+    /// Reproducción con la escena real del GLB: antes del fix, la animación
+    /// embebida de rotores jamás se evaluaba en Bevy 0.16 (el loader de glTF
+    /// no cablea un AnimationGraph; el jugador quedaba mudo) y no había luces
+    /// parpadeantes. Aquí se afirma que los nodos Rotor1..4 giran, el cuerpo
+    /// no gira con ellos y el nodo Strobe alterna visibilidad.
+    #[test]
+    fn rotores_giran_y_estrobo_parpadea_en_la_escena_real() {
+        let corredor = Corredor::cargar();
+        let ruta = perfil_ruta(&corredor, false);
+        let mut vuelo = Vuelo::nuevo(ruta);
+        vuelo.motor.iniciar();
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            bevy::render::mesh::MeshPlugin,
+            bevy::gltf::GltfPlugin::default(),
+            bevy::animation::AnimationPlugin,
+            bevy::transform::TransformPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
+        .init_asset::<bevy::animation::AnimationClip>()
+        // El spawner de escenas deserializa por reflexión: cada componente del
+        // GLB debe estar registrado (DefaultPlugins lo hace en la app real).
+        .register_type::<Visibility>()
+        .register_type::<InheritedVisibility>()
+        .register_type::<ViewVisibility>()
+        .register_type::<bevy::render::view::visibility::VisibilityClass>()
+        .register_type::<bevy::render::view::visibility::VisibleEntities>()
+        .register_type::<bevy::render::primitives::Aabb>()
+        .register_type::<Name>()
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .insert_resource(Time::<()>::default())
+        .insert_resource(vuelo)
+        .add_systems(Update, (animar_rotores, parpadear_estrobo));
+        app.finish();
+        app.cleanup();
+
+        let server = app.world().resource::<AssetServer>().clone();
+        let escena = server.load::<Scene>("corredor-dron.glb#Scene0");
+        for _ in 0..2000 {
+            app.update();
+            if matches!(server.get_load_state(&escena), Some(LoadState::Loaded)) {
+                break;
+            }
+        }
+        assert!(
+            matches!(server.get_load_state(&escena), Some(LoadState::Loaded)),
+            "corredor-dron.glb debe cargar en el test"
+        );
+
+        let dron = app
+            .world_mut()
+            .spawn((Dron, Transform::default(), Visibility::default()))
+            .id();
+        app.world_mut()
+            .entity_mut(dron)
+            .with_children(|padre| {
+                padre.spawn(SceneRoot(escena));
+            });
+
+        // El spawner de escenas materializa los nodos del GLB en actualizaciones.
+        let mut ids: HashMap<String, Entity> = HashMap::default();
+        for _ in 0..500 {
+            app.update();
+            ids.clear();
+            for entidad in app.world().iter_entities() {
+                if let Some(nombre) = entidad.get::<Name>() {
+                    ids.insert(nombre.as_str().to_string(), entidad.id());
+                }
+            }
+            if ["DronReparto", "Rotor1", "Strobe"]
+                .iter()
+                .all(|n| ids.contains_key(*n))
+            {
+                break;
+            }
+        }
+        for nombre in ["DronReparto", "Rotor1", "Rotor2", "Rotor3", "Rotor4", "Strobe"] {
+            assert!(ids.contains_key(nombre), "falta el nodo {nombre} en el GLB");
+        }
+
+        let rot_ini: Vec<Quat> = (1..=4)
+            .map(|n| {
+                app.world()
+                    .entity(ids[&format!("Rotor{n}")])
+                    .get::<Transform>()
+                    .unwrap()
+                    .rotation
+            })
+            .collect();
+        let cuerpo_ini = app
+            .world()
+            .entity(ids["DronReparto"])
+            .get::<Transform>()
+            .unwrap()
+            .rotation;
+
+        let mut estrobo_encendio = false;
+        let mut estrobo_apagado = false;
+        for _ in 0..120 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(16));
+            app.update();
+            match app
+                .world()
+                .entity(ids["Strobe"])
+                .get::<Visibility>()
+                .unwrap()
+            {
+                Visibility::Visible => estrobo_encendio = true,
+                _ => estrobo_apagado = true,
+            }
+        }
+
+        let mundo = app.world();
+        for n in 1..=4 {
+            let fin = mundo
+                .entity(ids[&format!("Rotor{n}")])
+                .get::<Transform>()
+                .unwrap()
+                .rotation;
+            assert_ne!(rot_ini[n - 1], fin, "Rotor{n} debe girar");
+        }
+        let cuerpo_fin = mundo
+            .entity(ids["DronReparto"])
+            .get::<Transform>()
+            .unwrap()
+            .rotation;
+        assert_eq!(cuerpo_ini, cuerpo_fin, "el cuerpo no debe girar con los rotores");
+        assert!(estrobo_encendio && estrobo_apagado, "el estrobo debe parpadear");
     }
 }

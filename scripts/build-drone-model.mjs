@@ -189,6 +189,10 @@ part("Acento", ellipsoid([0, 0.303, -0.11], [0.016, 0.005, 0.016], 12, 8));
 part("Metal", box([0, -0.02, -0.205], [0.2, 0.16, 0.03]));
 part("Blanco", ellipsoid([0, -0.235, 0.035], [0.018, 0.014, 0.014], 12, 8));
 
+// Estrobo trasero: nodo y malla propios para parpadearlo por código (el
+// escritorio no evalúa animaciones de glTF; la web sí las reproduce vía Cesium).
+const estroboGeom = ellipsoid([0, -0.185, 0.085], [0.02, 0.02, 0.02], 10, 6);
+
 const rotor = new Geometry();
 rotor.positions.push(...box([0.135, 0, 0], [0.21, 0.028, 0.007]).positions);
 rotor.normals.push(...box([0.135, 0, 0], [0.21, 0.028, 0.007]).normals);
@@ -208,10 +212,11 @@ append(rotorParts, "Carbono", rotor);
 const gltf = {
   asset: { version: "2.0", generator: "UTS-UIS procedural delivery drone" },
   scene: 0,
-  scenes: [{ nodes: [0, 1, 2, 3, 4] }],
+  scenes: [{ nodes: [0, 1, 2, 3, 4, 5] }],
   nodes: [
     { name: "DronReparto", mesh: 0 },
     ...motors.map((position, index) => ({ name: `Rotor${index + 1}`, mesh: 1, translation: position })),
+    { name: "Strobe", mesh: 2 },
   ],
   meshes: [],
   materials: materials.map((material) => ({
@@ -287,6 +292,7 @@ const addMesh = (name, parts) => {
 
 addMesh("Estructura", staticParts);
 addMesh("Aspas", rotorParts);
+addMesh("Estrobo", new Map([["Blanco", estroboGeom]]));
 
 const times = addAccessor([0, 0.25, 0.5, 0.75, 1], "SCALAR", 5126);
 const channels = [];
@@ -322,7 +328,12 @@ const binaryHeader = Buffer.alloc(8);
 binaryHeader.writeUInt32LE(binaryPadded.length, 0);
 binaryHeader.writeUInt32LE(0x004e4942, 4);
 
-const output = new URL("../web/public/models/dron-reparto.glb", import.meta.url);
+const bytes = Buffer.concat([header, jsonHeader, json, binaryHeader, binaryPadded]);
+const outputWeb = new URL("../web/public/models/dron-reparto.glb", import.meta.url);
 mkdirSync(new URL("../web/public/models/", import.meta.url), { recursive: true });
-writeFileSync(output, Buffer.concat([header, jsonHeader, json, binaryHeader, binaryPadded]));
-console.log(`Modelo GLB generado: ${totalLength} bytes, ${gltf.meshes.length} mallas, ${motors.length} rotores animados.`);
+writeFileSync(outputWeb, bytes);
+// Copia idéntica para el escritorio (clean-room: el asset se hornea fuera de desktop/).
+const outputDesktop = new URL("../desktop/assets/corredor-dron.glb", import.meta.url);
+mkdirSync(new URL("../desktop/assets/", import.meta.url), { recursive: true });
+writeFileSync(outputDesktop, bytes);
+console.log(`Modelo GLB generado: ${totalLength} bytes, ${gltf.meshes.length} mallas, ${motors.length} rotores animados (web + desktop).`);
