@@ -1,40 +1,26 @@
-import { useEffect, useState } from "react";
 import { DetailsSection } from "./components/DetailsSection";
 import { EventsPanel } from "./components/EventsPanel";
 import { SimulationStage } from "./components/SimulationStage";
 import { TelemetryPanel } from "./components/TelemetryPanel";
 import { useSimulation } from "./sim/useSimulation";
 
-interface HealthResponse {
-  ok: boolean;
-  version: string;
-  phase: number;
-}
-
 export function App() {
   const { buffer, telemetry, status, events, route, connected, send } = useSimulation();
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    fetch("/api/health")
-      .then((response) => (response.ok ? (response.json() as Promise<HealthResponse>) : null))
-      .then((data) => {
-        if (active) setHealth(data);
-      })
-      .catch(() => {
-        if (active) setHealth(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   return (
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">D</span>
+          <span className="brand-mark" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <circle cx="5" cy="5" r="2.6" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="19" cy="5" r="2.6" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="5" cy="19" r="2.6" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="19" cy="19" r="2.6" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M7 7L17 17M17 7L7 17" stroke="currentColor" strokeWidth="1.6" />
+              <rect x="10.4" y="10.4" width="3.2" height="3.2" rx="0.8" fill="currentColor" />
+            </svg>
+          </span>
           <div>
             <p className="brand-name">Dron UTS · UIS</p>
             <p className="brand-sub">Simulación de reparto en Bucaramanga</p>
@@ -45,7 +31,6 @@ export function App() {
             <span className="status-dot" />
             {connected ? "Motor conectado" : "Reconectando"}
           </span>
-          <span className="badge">Fase {health?.phase ?? 3}</span>
         </div>
       </header>
 
@@ -69,7 +54,6 @@ export function App() {
       </main>
 
       <footer className="footer">
-        <span>Node 22 · TypeScript · React · CesiumJS</span>
         <span>Geodatos: OpenStreetMap contributors, ODbL</span>
       </footer>
     </div>

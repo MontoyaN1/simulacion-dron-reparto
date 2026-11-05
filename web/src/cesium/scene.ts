@@ -6,6 +6,7 @@ import { CameraRig } from "./camera-rig";
 import { loadBuildingPrimitive } from "./buildings";
 import { createWorldFrame, type WorldFrame } from "./world";
 import { TerrainSampling } from "./terrain";
+import { RouteGroundTable } from "./route-ground";
 import { MissionDirector, type CameraShot, type MissionState } from "./mission";
 import type { TelemetryBuffer } from "../sim/buffer";
 
@@ -19,6 +20,7 @@ const css = (value: string, alpha = 1): Cesium.Color =>
 export class DroneScene {
   private readonly viewer: Cesium.Viewer;
   private readonly world: WorldFrame;
+  private readonly corredor: RouteGroundTable;
   private readonly drone: DroneModel;
   private readonly cameraRig: CameraRig;
   private readonly terrain: TerrainSampling;
@@ -34,7 +36,7 @@ export class DroneScene {
   private cameraUnlockAt = performance.now() + INITIAL_DURATION_MS;
   private cameraFollowing = false;
   private destroyed = false;
-  private cityPrimitive: Cesium.Primitive | null = null;
+  private cityPrimitive: Cesium.PrimitiveCollection | null = null;
   private osmBuildings: Cesium.Cesium3DTileset | null = null;
   private readonly resizeObserver: ResizeObserver;
   private readonly creditContainer: HTMLDivElement;
@@ -79,7 +81,9 @@ export class DroneScene {
     container.append(this.creditContainer);
 
     const imagery = new Cesium.UrlTemplateImageryProvider({
-      url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      // Por el proxy propio con caché en disco: Esri sin token se agota y
+      // la ciudad quedaba gris. Atribución intacta.
+      url: "tiles/esri/{z}/{y}/{x}",
       maximumLevel: 19,
       credit: new Cesium.Credit("Esri World Imagery"),
     });
@@ -99,13 +103,35 @@ export class DroneScene {
       shouldAnimate: true,
       useDefaultRenderLoop: false,
       showRenderLoopErrors: false,
-      msaaSamples: 4,
+      msaaSamples: 2,
       contextOptions: {
         webgl: { antialias: true, powerPreference: "high-performance" },
       },
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
     });
-    this.viewer.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
+    // Presupuesto de render: el objetivo del proyecto es >= 30 fps.
+    // Los dos costes dominantes en GPU integrada eran la escala sobre dpr
+    // (píxeles×2.25) y la cadena de bloom (varios pases fullscreen).
+    const params = new URLSearchParams(window.location.search);
+    const calidad = params.get("calidad") ?? "alta";
+    // Presupuesto agressivo por defecto: es lo que sostiene >= 30 fps en
+    // GPU integrada. `?calidad=cine` sube al look de la presentación.
+    // `?calidad=baja` quita sombras y antialias por completo.
+    this.viewer.resolutionScale = Math.min(window.devicePixelRatio, 0.75);
+    this.viewer.scene.msaaSamples = 1;
+    this.viewer.scene.shadowMap.softShadows = false;
+    this.viewer.scene.postProcessStages.bloom.enabled = calidad === "cine";
+    this.viewer.scene.postProcessStages.fxaa.enabled = calidad === "cine";
+    if (calidad === "baja") {
+      this.viewer.resolutionScale = Math.max(0.5, window.devicePixelRatio * 0.6);
+      this.viewer.scene.postProcessStages.fxaa.enabled = false;
+      this.viewer.scene.postProcessStages.bloom.enabled = false;
+      this.viewer.scene.shadowMap.enabled = false;
+    }
+    // `?fps` muestra el contador real de Cesium (verificación de 30 fps).
+    // `?fps` muestra el contador real de Cesium: es el gate de los 30 fps.
+    if (params.has("fps")) this.viewer.scene.debugShowFramesPerSecond = true;
+
     this.viewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
     this.viewer.scene.screenSpaceCameraController.minimumZoomDistance = 1.5;
     this.viewer.scene.screenSpaceCameraController.maximumZoomDistance = 2400;
@@ -129,6 +155,11 @@ export class DroneScene {
     scene.globe.dynamicAtmosphereLightingFromSun = true;
     scene.globe.showGroundAtmosphere = true;
     scene.globe.depthTestAgainstTerrain = true;
+    // Rendimiento del mapa: SSE 2 (por defecto) pide 4x más tiles de terreno y
+    // satelital. 6 mantiene nitidez de vuelo y baja el tráfico a ~1/3;
+    // caché mayor para no volver a pedir lo ya visto.
+    scene.globe.maximumScreenSpaceError = 6;
+    scene.globe.tileCacheSize = 300;
     scene.fog.enabled = true;
     scene.fog.density = 0.00012;
     scene.fog.minimumBrightness = 0.1;
@@ -136,15 +167,15 @@ export class DroneScene {
 
     // Sombra real: sin esto el dron parece flotar sobre la ciudad.
     scene.shadowMap.enabled = true;
-    scene.shadowMap.softShadows = true;
+    scene.shadowMap.softShadows = false;
     scene.shadowMap.darkness = 0.32;
-    scene.shadowMap.size = 2048;
-    scene.shadowMap.maximumDistance = 4500;
+    scene.shadowMap.size = 1024;
+    scene.shadowMap.maximumDistance = 2200;
 
     // Bloom: los materiales emisivos del dron y la polilínea brillante no
     // existen visualmente sin esta etapa.
     const bloom = scene.postProcessStages.bloom;
-    bloom.enabled = true;
+    bloom.enabled = calidad === "cine";
     bloom.uniforms.glowOnly = false;
     bloom.uniforms.contrast = 128;
     bloom.uniforms.brightness = -0.32;
@@ -174,7 +205,8 @@ export class DroneScene {
 
     this.world = createWorldFrame();
     this.world.setGround(CITY_GROUND_HEIGHT, true);
-    this.terrain = new TerrainSampling(this.viewer, this.world);
+    this.corredor = new RouteGroundTable();
+    this.terrain = new TerrainSampling(this.viewer, this.world, this.corredor);
     this.addBeacons();
     this.drone = new DroneModel(this.viewer, this.world);
     this.cameraRig = new CameraRig(this.viewer, this.world, this.terrain);
@@ -194,12 +226,17 @@ export class DroneScene {
     this.resizeObserver.observe(container);
     this.startRenderLoop();
 
-    if (import.meta.env.DEV) {
+    // Herramienta de diagnóstico remota: con `?debug` queda el manejador de la
+    // escena expuesto incluso en producción para poder medir sin dev.
+    if (import.meta.env.DEV || params.has("debug")) {
       (window as unknown as Record<string, unknown>).__dronScene = this;
       // Diagnóstico en desarrollo: cambia la hora del sol sin tocar código.
       (window as unknown as Record<string, unknown>).__setSun = (iso: string) => {
         this.viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(iso);
       };
+      // Diagnóstico en desarrollo: expone Cesium para regenerar la muestra de
+      // alturas de los edificios sin modificar el bundler.
+      (window as unknown as Record<string, unknown>).__Cesium = Cesium;
       // Diagnóstico en desarrollo: reconstruye el primitivo de edificios con el
       // terreno ya cargado. Sirve para detectar si se hornearon con alturas de
       // baja resolución.
@@ -345,8 +382,15 @@ export class DroneScene {
       // ruta, balizas y dron) se apoya en el terreno que se ve, no en la
       // rejilla offline, que en la UTS estaba desviada ~10 m.
       this.world.setHeightProvider((vector) => this.terrain.agl(vector));
-      await this.terrain.prewarm([[0, 0, 0], routeFrame.displacement]);
       if (this.destroyed) return;
+      // Tabla de alturas del corredor: se muestrea una vez (y se guarda en
+      // localStorage) para que el vuelo no dispare peticiones de terreno.
+      try {
+        await this.corredor.cargar({ world: this.world, terrain });
+        console.info("[corredor] alturas registradas");
+      } catch (error) {
+        console.warn("[corredor] sin tabla de alturas; se usa la rejilla offline", error);
+      }
       this.refreshGround();
       this.missionDirector?.refreshZones();
     } catch (error) {
@@ -469,8 +513,6 @@ export class DroneScene {
     if (!sample) return;
 
     const now = performance.now();
-    // Mantiene el muestreo del terreno real al día mientras el dron se mueve.
-    this.terrain.request(sample.position);
 
     const hoverOverride = this.missionDirector?.hoverZ(sample) ?? null;
     this.drone.update(sample, hoverOverride);

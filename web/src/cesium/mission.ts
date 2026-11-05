@@ -3,22 +3,9 @@ import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
 import { DRONE_HANDOFF_HEIGHT, MISSION_ZONES, PACKAGE_SIZE } from "./constants";
 import type { WorldFrame } from "./world";
 
-export type MissionState =
-  | "esperando"
-  | "en_zona"
-  | "animando_entrega"
-  | "paquete_cargado"
-  | "animando_recepcion"
-  | "completado";
-
-export const MISSION_STATE_LABEL: Record<MissionState, string> = {
-  esperando: "Zonas listas",
-  en_zona: "En zona",
-  animando_entrega: "Entrega del paquete…",
-  paquete_cargado: "Paquete cargado",
-  animando_recepcion: "Recepción del paquete…",
-  completado: "Recepción completada",
-};
+export type { MissionState } from "../mision/tipos";
+export { MISSION_STATE_LABEL } from "../mision/tipos";
+import type { MissionState } from "../mision/tipos";
 
 /** Plano de cámara relativo al dron para las dos secuencias. */
 export interface CameraShot {

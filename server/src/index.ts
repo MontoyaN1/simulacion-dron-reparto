@@ -1,6 +1,10 @@
 import websocket from "@fastify/websocket";
+import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { WebSocket } from "ws";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import type { ClientCommand, ServerMessage } from "@dron/shared";
 import {
   CAMPUSES,
@@ -10,6 +14,7 @@ import {
   routeFrame,
 } from "@dron/shared";
 import { loadBuildings } from "./sim/buildings";
+import { registrarProxyTiles } from "./tiles";
 import { SimulationRuntime } from "./sim/runtime";
 
 const SERVICE_NAME = "simulacion-dron-reparto";
@@ -42,6 +47,44 @@ const app = Fastify({
 });
 
 await app.register(websocket);
+await registrarProxyTiles(app);
+
+// Cliente compilado (producción): sirve web/dist y hace fallback SPA.
+// En desarrollo el cliente vive en Vite (:5173) y aquí no se registra nada.
+const webDist = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../web/dist",
+);
+if (existsSync(webDist)) {
+  await app.register(fastifyStatic, {
+    root: webDist,
+    prefix: "/",
+    wildcard: false,
+    index: false,
+    cacheControl: false,
+    // index.html a no-store: un html cacheado apunta a assets con hash de un
+    // build viejo (yield: "La página queda en blanco hasta un reload duro").
+    // Los assets con hash son inmutables.
+    setHeaders: (res, ruta) => {
+      if (ruta.endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store");
+      } else if (ruta.includes("/assets/")) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      } else {
+        res.setHeader("Cache-Control", "public, max-age=3600");
+      }
+    },
+  });
+  app.head("/", async (_request, reply) => reply.send());
+  app.get("/", async (_request, reply) => reply.sendFile("index.html"));
+  app.setNotFoundHandler((request, reply) => {
+    if (request.url.startsWith("/api") || request.url.startsWith("/ws")) {
+      return reply.code(404).send({ error: "No encontrado" });
+    }
+    return reply.sendFile("index.html");
+  });
+  app.log.info({ webDist }, "sirviendo el cliente compilado");
+}
 
 app.get("/api/health", async () => ({
   ok: true,
