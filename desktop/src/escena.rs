@@ -38,7 +38,7 @@ pub struct EscenaPlugin;
 impl Plugin for EscenaPlugin {
     fn build(&self, app: &mut App) {
         let corredor = Corredor::cargar();
-        let ruta = perfil_ruta(&corredor);
+        let ruta = perfil_ruta(&corredor, false);
         // Relleno de cielo: sin él las caras a contraluz quedan en negro puro.
         // En Bevy 0.16 el ambiente es un recurso (o componente de cámara).
         app.insert_resource(AmbientLight {
@@ -46,6 +46,7 @@ impl Plugin for EscenaPlugin {
             brightness: 2_500.0,
             affects_lightmapped_meshes: false,
         })
+        .insert_resource(Sentido::default())
         .insert_resource(Vuelo::nuevo(ruta))
             .insert_resource(corredor)
             .init_resource::<ColisionEdificios>()
@@ -67,18 +68,52 @@ impl Plugin for EscenaPlugin {
     }
 }
 
-/** Ruta UTS->UIS con etapas verticales y un leve giro S. */
-fn perfil_ruta(corredor: &Corredor) -> Vec<[f64; 3]> {
+/// Sentido del recorrido. El marco académico ENU sigue con origen en la UTS.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sentido {
+    #[default]
+    UtsAUis,
+    UisAuts,
+}
+
+impl Sentido {
+    pub fn invertir(self) -> Self {
+        match self {
+            Sentido::UtsAUis => Sentido::UisAuts,
+            Sentido::UisAuts => Sentido::UtsAUis,
+        }
+    }
+
+    pub fn nombre(self) -> &'static str {
+        match self {
+            Sentido::UtsAUis => "UTS → UIS",
+            Sentido::UisAuts => "UIS → UTS",
+        }
+    }
+}
+
+/** Ruta según el sentido: UTS→UIS (`invertida=false`) o UIS→UTS (`invertida=true`).
+ * Las etapas son los mismos puntos geométricos (mismo `along` absoluto, luego la
+ * curva S y las etapas de ±8 m son idénticas), emitidos en orden inverso; los
+ * extremos se intercambian y el perfil vertical se voltea (despegue vertical en
+ * el nuevo origen, descenso vertical al nuevo destino). */
+fn perfil_ruta(corredor: &Corredor, invertida: bool) -> Vec<[f64; 3]> {
     let [dx, dn] = corredor.desplazamiento;
-    let suelo_uts = corredor.agl(0.0, 0.0);
-    let suelo_uis = corredor.agl(dx, dn);
+    let (origen, destino) = if invertida {
+        ([dx, dn], [0.0, 0.0])
+    } else {
+        ([0.0, 0.0], [dx, dn])
+    };
+    let suelo_origen = corredor.agl(origen[0], origen[1]);
+    let suelo_destino = corredor.agl(destino[0], destino[1]);
     let mut ruta = vec![
-        [0.0, 0.0, suelo_uts],
-        [0.0, 0.0, suelo_uts + ALTITUD_CRUCERO],
+        [origen[0], origen[1], suelo_origen],
+        [origen[0], origen[1], suelo_origen + ALTITUD_CRUCERO],
     ];
     let etapas = 14;
     for k in 1..=etapas {
-        let along = corredor.largo * k as f64 / etapas as f64;
+        let t = k as f64 / etapas as f64;
+        let along = corredor.largo * if invertida { 1.0 - t } else { t };
         // Curva S suave: hasta ±20 m laterales, cero en los extremos.
         let lateral = 20.0 * (std::f64::consts::TAU * along / corredor.largo).sin();
         // Crucero a 50 m con dos etapas de altitud (±8 m) a lo largo.
@@ -86,7 +121,7 @@ fn perfil_ruta(corredor: &Corredor) -> Vec<[f64; 3]> {
         let [este, norte] = corredor.punto(along, lateral);
         ruta.push([este, norte, corredor.agl(este, norte) + alt]);
     }
-    ruta.push([dx, dn, suelo_uis]);
+    ruta.push([destino[0], destino[1], suelo_destino]);
     ruta
 }
 
@@ -2064,5 +2099,29 @@ mod pruebas_edificios {
         assert!(cuenta(lin(0.60), lin(0.34), lin(0.24)) >= 6, "teja terracota");
         assert!(cuenta(lin(0.60), lin(0.63), lin(0.68)) >= 100, "cúpula del planetario");
         assert!(cuenta(lin(0.30), lin(0.48), lin(0.72)) >= 16, "coronas azules UTS");
+    }
+
+    #[test]
+    fn perfil_ruta_voltea_extremos_y_etapas() {
+        let c = Corredor::cargar();
+        let f = perfil_ruta(&c, false);
+        let i = perfil_ruta(&c, true);
+        // extremos: origen/destino intercambiados (suelo de cada campus)
+        assert!((f[0][0] - 0.0).abs() < 1e-6 && (f[0][1] - 0.0).abs() < 1e-6);
+        assert!((i[0][0] - c.desplazamiento[0]).abs() < 1e-6
+            && (i[0][1] - c.desplazamiento[1]).abs() < 1e-6);
+        assert!((i.last().unwrap()[0] - 0.0).abs() < 1e-6
+            && (i.last().unwrap()[1] - 0.0).abs() < 1e-6);
+        // las etapas son los mismos puntos geométricos, en orden inverso
+        let n = f.len();
+        for k in 1..n - 1 {
+            for axis in 0..3 {
+                assert!((f[k][axis] - i[n - 1 - k][axis]).abs() < 1e-6,
+                    "etapa {k} eje {axis}: {} vs {}", f[k][axis], i[n - 1 - k][axis]);
+            }
+        }
+        // el perfil vertical se voltea: el segundo punto es el despegue vertical
+        assert!(f[1][2] - f[0][2] > 40.0);
+        assert!(i[1][2] - i[0][2] > 40.0);
     }
 }
