@@ -10,7 +10,7 @@ mod escena;
 mod matematica;
 mod nucleo;
 
-use escena::{Camara, Corredor, EscenaPlugin, VelSim, Vuelo};
+use escena::{Camara, Corredor, EscenaPlugin, Sentido, VelSim, Vuelo};
 use matematica::{vec3, LiveAlgebra, Mat3};
 use nucleo::{Fase, MuestraTelemetria};
 
@@ -149,31 +149,40 @@ struct DatosRuta {
     matriz: Mat3,
 }
 
-fn datos_ruta(corredor: &Corredor, vuelo: &Vuelo) -> DatosRuta {
+/// Rumbo horizontal de `a` hacia `b`, en grados 0..360 (este vs norte).
+fn rumbo_horizontal(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    let (dx, dn) = (b[0] - a[0], b[1] - a[1]);
+    (dx.atan2(dn) * 180.0 / std::f64::consts::PI + 360.0) % 360.0
+}
+
+fn datos_ruta(corredor: &Corredor, ruta: &[[f64; 3]]) -> DatosRuta {
     let (edificios, bloquean) = escena::contar_edificios(corredor);
-    let ruta = &vuelo.ruta;
     let mut total = 0.0;
     for i in 1..ruta.len() {
         total += nucleo::distancia(&ruta[i - 1], &ruta[i]);
     }
-    let recta = nucleo::distancia(&ruta[0], &ruta[ruta.len() - 1]);
-    let [dx, dn] = corredor.desplazamiento;
-    let dist = corredor.largo;
+    // Todo lo direccional se deriva de los extremos de la ruta: al voltear
+    // el sentido, rumbo ≈ +180°, destino académico ≈ (0, 0) (el marco ENU
+    // académico tiene origen fijo en la UTS) y ĥ cambia de signo.
+    let origen = ruta[0];
+    let destino = ruta[ruta.len() - 1];
+    let [dx, dn] = [destino[0] - origen[0], destino[1] - origen[1]];
+    let dist = (dx * dx + dn * dn).sqrt();
     DatosRuta {
         edificios,
         bloquean,
         waypoints: ruta.len() as u32,
-        desvio: if recta > 0.0 {
-            (total / recta - 1.0) * 100.0
+        desvio: if dist > 0.0 {
+            (total / dist - 1.0) * 100.0
         } else {
             0.0
         },
         distancia: dist,
-        rumbo: (dx.atan2(dn) * 180.0 / std::f64::consts::PI + 360.0) % 360.0,
+        rumbo: rumbo_horizontal(&origen, &destino),
         escala: dist / matematica::ACADEMICO_NORM,
         destino: [
-            dx * matematica::ACADEMICO_NORM / dist,
-            dn * matematica::ACADEMICO_NORM / dist,
+            destino[0] * matematica::ACADEMICO_NORM / dist,
+            destino[1] * matematica::ACADEMICO_NORM / dist,
         ],
         dir_h: [dx / dist, dn / dist, 0.0],
         matriz: matematica::matriz_enu(escena::LAT_UTS, escena::LON_UTS),
@@ -187,13 +196,28 @@ fn hud(
     mut camara: ResMut<Camara>,
     mut vel: ResMut<VelSim>,
     tiempo: Res<Time>,
-    mut datos: Local<Option<DatosRuta>>,
+    mut sentido: ResMut<Sentido>,
+    mut datos: Local<Option<([f64; 3], [f64; 3], DatosRuta)>>,
     mut abierto: Local<Option<bool>>,
 ) {
     let ctx = contexts.ctx_mut().expect("egui ctx");
     let m = vuelo.motor.telemetria();
     // Altura real sobre el terreno (no sobre el ancla).
     let sobre_suelo = m.posicion[2] - corredor.agl(m.posicion[0], m.posicion[1]);
+
+    // Datos del panel: caché claveada por los extremos de la ruta, para
+    // recalcular rumbo/destino/dirección al voltear el sentido.
+    let modelo = {
+        let extremos = (vuelo.ruta[0], vuelo.ruta[vuelo.ruta.len() - 1]);
+        let obsoleto = match &*datos {
+            Some((o, d, _)) => *o != extremos.0 || *d != extremos.1,
+            None => true,
+        };
+        if obsoleto {
+            *datos = Some((extremos.0, extremos.1, datos_ruta(&corredor, &vuelo.ruta)));
+        }
+        &datos.as_ref().expect("datos de ruta").2
+    };
 
     let panel_abierto = abierto.unwrap_or(true);
     let mut toggle = ctx.input(|i| i.key_pressed(egui::Key::M));
@@ -206,7 +230,7 @@ fn hud(
             .resizable(true)
             .frame(egui::Frame::NONE.fill(FONDO).stroke(egui::Stroke::new(1.0_f32, BORDE)))
             .show(ctx, |ui| {
-                panel_modelo(ui, &m, datos.get_or_insert_with(|| datos_ruta(&corredor, &vuelo)))
+                panel_modelo(ui, &m, modelo)
             });
     }
 
@@ -222,7 +246,7 @@ fn hud(
                 marca_dron(ui, 20.0, TEXTO);
                 ui.add_space(10.0);
                 ui.label(
-                    egui::RichText::new("DRON · UTS → UIS")
+                    egui::RichText::new(format!("DRON · {}", sentido.nombre()))
                         .color(TEXTO)
                         .strong()
                         .size(16.0),
@@ -274,6 +298,9 @@ fn hud(
                     }
                     if boton(ui, "Reiniciar", false) {
                         vuelo.reiniciar();
+                    }
+                    if boton(ui, &format!("Sentido: {}", sentido.nombre()), false) {
+                        *sentido = sentido.invertir();
                     }
                     if boton(ui, "MODELO", panel_abierto) {
                         toggle = true;
@@ -635,5 +662,42 @@ fn captura(
                 .spawn(Screenshot::primary_window())
                 .observe(save_to_disk(ruta));
         }
+    }
+}
+
+#[cfg(test)]
+mod pruebas {
+    use super::*;
+
+    #[test]
+    fn rumbo_se_voltea_180_al_invertir_extremos() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [300.0, 400.0, 0.0];
+        let ir = rumbo_horizontal(&a, &b);
+        let vu = rumbo_horizontal(&b, &a);
+        assert!(((ir - vu + 180.0).abs() % 360.0) < 1e-9
+            || ((vu - ir + 180.0).abs() % 360.0) < 1e-9);
+        assert!(ir >= 0.0 && ir < 360.0);
+    }
+
+    #[test]
+    fn datos_ruta_voltea_rumbo_y_destino_al_invertir() {
+        let c = Corredor::cargar();
+        let [dx, dn] = c.desplazamiento;
+        let ida = vec![[0.0, 0.0, 100.0], [dx, dn, 100.0]];
+        let vuelta = vec![[dx, dn, 100.0], [0.0, 0.0, 100.0]];
+        let di = datos_ruta(&c, &ida);
+        let dv = datos_ruta(&c, &vuelta);
+        // rumbo volteado 180°
+        let dif = (di.rumbo - dv.rumbo + 180.0).abs() % 360.0;
+        assert!(dif < 1e-9, "rumbo {} vs {}", di.rumbo, dv.rumbo);
+        // destino académico: el marco tiene origen fijo en la UTS, así que al
+        // invertir (llegada = UTS) el destino académico es (0, 0).
+        assert!(dv.destino[0].abs() < 1e-9 && dv.destino[1].abs() < 1e-9);
+        assert!((di.destino[0] - dx * matematica::ACADEMICO_NORM / di.distancia).abs() < 1e-9);
+        assert!((di.destino[1] - dn * matematica::ACADEMICO_NORM / di.distancia).abs() < 1e-9);
+        // dirección horizontal de viaje también se voltea
+        assert!((di.dir_h[0] + dv.dir_h[0]).abs() < 1e-9);
+        assert!((di.dir_h[1] + dv.dir_h[1]).abs() < 1e-9);
     }
 }

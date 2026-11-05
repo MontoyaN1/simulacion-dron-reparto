@@ -249,7 +249,7 @@ impl MallaAltura {
 }
 
 impl Corredor {
-    fn cargar() -> Self {
+    pub fn cargar() -> Self {
         let terreno = Self::cargar_terreno("assets/alturas-terreno.json");
         // El área amplia (municipios y veredas) es opcional: si no está, el
         // fondo usa la misma rejilla del corredor.
