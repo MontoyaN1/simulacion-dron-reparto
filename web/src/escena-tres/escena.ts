@@ -388,13 +388,16 @@ export class EscenaTres {
   }
 
   private camaraActualiza(sample: Telemetry, dt: number): void {
-    if (this.camaraBloqueada) {
-      if (performance.now() < this.liberarCamaraEn) return;
-      this.camaraBloqueada = false;
-    }
     const display = this.displayDron(sample);
     const agl = this.alturaSuelo(display);
     const objetivo = new THREE.Vector3(display[0], agl + display[2], display[1]);
+    if (this.camaraBloqueada) {
+      // Plano de establecimiento: la cámara está lejos, pero sigue apuntando
+      // al dron para que nunca salga de cuadro mientras dura el plano.
+      this.rig.mirar(objetivo);
+      if (performance.now() < this.liberarCamaraEn) return;
+      this.camaraBloqueada = false;
+    }
     // La fase de la telemetría elige el encuadre (despegue/crucero/descenso/
     // entregado); el rig siempre hace lookAt al dron. setFase() manda hasta
     // que el vuelo cambie realmente de fase.

@@ -86,6 +86,23 @@ describe("Task 4: cámara por fase y dron siempre en cuadro", () => {
     expect(new Set(planos).size).toBe(4);
   });
 
+  it("con la cámara pegada al dron (colisión) el dron sigue centrado", () => {
+    // La resolución de colisiones puede dejar la cámara a ~1 m del dron. Un
+    // lookAt a un punto adelantado al rumbo deja al dron fuera de cuadro
+    // (bug visto en vuelo real: NDC y = -2.6 durante el despegue).
+    const rig = new RigCamara(16 / 9);
+    rig.setFase("despegue");
+    const dron = new THREE.Vector3(0, 5.5, 0);
+    // Emula `posicionSegura`: siempre devuelve un punto a 1.2 m del dron.
+    rig.segura = (objetivo, deseada) => {
+      const dir = deseada.clone().sub(objetivo).normalize();
+      return objetivo.clone().addScaledVector(dir, 1.2);
+    };
+    for (let i = 0; i < 120; i++) rig.actualizar(dron, 0, 1 / 60, 5);
+    expect(rig.camara.position.distanceTo(dron)).toBeLessThan(2);
+    expect(dronEnFrustum(dron, vistaProyeccion(rig.camara), 0.99)).toBe(true);
+  });
+
   it("el plano amplio de arranque no pierde el dron", () => {
     // Reproduce los primeros 2.4 s del visor: cámara amplia sobre el centro de
     // la ruta mirando al origen. El dron está en el pad, fuera de cuadro.

@@ -116,9 +116,11 @@ export class RigCamara {
     const { adelanto, offset } = offsetCamara(this.fase, rumbo, this.dist, altura);
     const objetivo = posicion.clone().add(adelanto);
     const deseada = objetivo.clone().add(offset);
-    this.camara.position.lerp(this.segura(objetivo, deseada), 1 - Math.exp(-dt * 6));
-    // lookAt SIEMPRE: es lo que garantiza el dron en cuadro en las 4 fases.
-    this.camara.lookAt(objetivo);
+    // La colisión se resuelve desde el dron: si se hace desde el punto
+    // adelantado, al acercarse la cámara el dron se va de cuadro.
+    this.camara.position.lerp(this.segura(posicion, deseada), 1 - Math.exp(-dt * 6));
+    // lookAt al DRON (no al adelanto): único punto que debe quedar en cuadro.
+    this.camara.lookAt(posicion);
   }
 
 }
