@@ -1,6 +1,8 @@
 import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
+import { calcularFps, detectarBackend, webgpuDisponible, type Backend } from "./render";
 import {
   CITY_GROUND_HEIGHT,
   COLORS,
@@ -29,7 +31,10 @@ export interface EscenaTresOpciones {
 
 /** Escena three.js del corredor: único motor de render. */
 export class EscenaTres {
-  private readonly renderer: THREE.WebGLRenderer;
+  private readonly renderer: WebGPURenderer;
+  private backendActivo: Backend = "webgl";
+  private readonly fpsDeltas: number[] = [];
+  private fpsValor = 0;
   private readonly mundo = new THREE.Scene();
   private readonly camara: THREE.PerspectiveCamera;
   private readonly contenedor: HTMLElement;
@@ -71,7 +76,11 @@ export class EscenaTres {
     this.contenedor = container;
     this.corredor = opciones.corredor;
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    // WebGPURenderer con fallback WebGL2 integrado en three (forceWebGL). Se
+    // marca el backend activo según soporte; init() es async y se resuelve en
+    // background, pero render() ya lo espera por sí mismo.
+    this.renderer = new WebGPURenderer({ antialias: true, powerPreference: "high-performance" });
+    void this.iniciarBackend();
     // Presupuesto de píxeles: dpr alto en iGPU era la mitad del coste.
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
     this.renderer.setSize(Math.max(2, container.clientWidth), Math.max(2, container.clientHeight));
@@ -245,6 +254,29 @@ export class EscenaTres {
     }
   }
 
+  /** Inicializa el renderer (async) y registra el backend efectivo. */
+  private async iniciarBackend(): Promise<void> {
+    try {
+      const disponible = webgpuDisponible();
+      this.backendActivo = await detectarBackend(disponible);
+      await this.renderer.init();
+    } catch (error) {
+      // Fallback: three fuerza WebGL2 si WebGPU no está o init falla.
+      this.backendActivo = "webgl";
+      console.warn("[tres] WebGPU no disponible; se usa el backend WebGL2", error);
+    }
+  }
+
+  /** Backend de render efectivo: "webgpu" o "webgl". */
+  backend(): Backend {
+    return this.backendActivo;
+  }
+
+  /** FPS promediado de los últimos frames (0 antes del primer frame). */
+  fps(): number {
+    return this.fpsValor;
+  }
+
   attachBuffer(buffer: EscenaBuffer): void {
     this.buffer = buffer;
   }
@@ -384,8 +416,13 @@ export class EscenaTres {
     if (this.destruida) return;
     try {
       const ahora = performance.now();
-      const dt = Math.min(0.1, Math.max(0.001, (ahora - this.lastFrame) / 1000));
+      const deltaMs = ahora - this.lastFrame;
+      const dt = Math.min(0.1, Math.max(0.001, deltaMs / 1000));
       this.lastFrame = ahora;
+      // Rolling de FPS sobre los últimos 60 frames.
+      this.fpsDeltas.push(deltaMs);
+      if (this.fpsDeltas.length > 60) this.fpsDeltas.shift();
+      this.fpsValor = calcularFps(this.fpsDeltas);
       const sample = this.buffer?.sample();
       if (!sample) {
         this.renderer.render(this.mundo, this.camara);
