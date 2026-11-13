@@ -16,6 +16,16 @@ import type { RouteGroundTable } from "./route-ground";
 import type { MissionState } from "../mision/tipos";
 import { construirCiudad, enuATres } from "./ciudad";
 import { MisionTres } from "./mision";
+import { RigCamara, crearEtiqueta, crearHalo, type Fase } from "./camara";
+
+/** Fase de telemetría → fase de encuadre de cámara. */
+const FASE_DE: Record<Telemetry["phase"], Fase> = {
+  idle: "despegue",
+  takeoff: "despegue",
+  cruise: "crucero",
+  descent: "descenso",
+  delivered: "entregado",
+};
 
 const FOV = 52;
 const TRAIL_MIN = 2.5;
@@ -33,6 +43,7 @@ export interface EscenaTresOpciones {
 export class EscenaTres {
   private readonly renderer: WebGPURenderer;
   private backendActivo: Backend = "webgl";
+  private inicializado = false;
   private readonly fpsDeltas: number[] = [];
   private fpsValor = 0;
   private readonly mundo = new THREE.Scene();
@@ -46,6 +57,8 @@ export class EscenaTres {
   private readonly dron = new THREE.Group();
   private dronMesh: THREE.Object3D | null = null;
   private readonly rotores: THREE.Object3D[] = [];
+  private readonly halo = crearHalo();
+  private readonly etiqueta = crearEtiqueta("UTS-01");
   private readonly sombraSuelo: THREE.Mesh;
 
   private readonly trail: THREE.Line;
@@ -56,15 +69,15 @@ export class EscenaTres {
 
   private buffer: EscenaBuffer | null = null;
   private onEstado: ((estado: MissionState) => void) | null = null;
-  private modo: CameraMode = "chase";
-  /** Distancia de cámara al dron (m), controlada por la rueda. */
-  private dist = 8.6;
+  /** Rig de cámara: encuadre por fase y modos chase/orbit/top/free. */
+  private readonly rig: RigCamara;
   private destruida = false;
   private lastFrame = performance.now();
   private rumboActual = 0;
   private pitchFuselage = 0;
   private rollFuselage = 0;
-  private orbita = 0;
+  /** Última fase vista en telemetría: solo reencuadra cuando cambia de verdad. */
+  private faseTelemetria: Fase | null = null;
   private camaraBloqueada = true;
   private liberarCamaraEn = performance.now() + 2400;
   private ultimoT = 0;
@@ -94,7 +107,8 @@ export class EscenaTres {
     );
     this.camara.position.set(0, 220, -420);
     this.camara.lookAt(0, 0, 0);
-    this.dist = 8.6;
+    this.rig = new RigCamara(this.camara.aspect, this.camara);
+    this.rig.segura = (objetivo, deseada) => this.posicionSegura(objetivo, deseada);
 
     // Zoom con rueda dentro del visor: preventDefault + passive:false para que
     // la página no haga scroll (era el choque reportado). Limitado 3\u201360 m.
@@ -109,7 +123,7 @@ export class EscenaTres {
           : evento.deltaMode === 2
             ? evento.deltaY * window.innerHeight
             : evento.deltaY;
-      this.dist = Math.max(3, Math.min(60, this.dist * Math.exp(dy * 0.001)));
+      this.rig.dist = Math.max(3, Math.min(60, this.rig.dist * Math.exp(dy * 0.001)));
     }, { passive: false });
     this.mundo.background = new THREE.Color("#8fb4d8");
     this.mundo.fog = new THREE.Fog(new THREE.Color("#a9c4dd"), 1600, 4600);
@@ -124,6 +138,9 @@ export class EscenaTres {
       new THREE.MeshBasicMaterial({ color: "#000000", transparent: true, opacity: 0.22 }),
     );
     this.sombraSuelo.rotation.x = -Math.PI / 2;
+    // Halo y etiqueta cuelgan del grupo del dron: se ven en las 4 fases.
+    this.halo.position.y = 0.15;
+    this.dron.add(this.halo, this.etiqueta);
     this.mundo.add(this.sombraSuelo);
 
     this.trail = new THREE.Line(
@@ -258,12 +275,19 @@ export class EscenaTres {
   private async iniciarBackend(): Promise<void> {
     try {
       const disponible = webgpuDisponible();
-      this.backendActivo = await detectarBackend(disponible);
       await this.renderer.init();
+      // Backend real: el fallback interno de three puede activar WebGL2 aunque
+      // navigator.gpu exista, así que se lee del renderer, no de la detección.
+      const esWebGPU = (this.renderer.backend as { isWebGPUBackend?: boolean })
+        ?.isWebGPUBackend;
+      this.backendActivo = esWebGPU ? "webgpu" : await detectarBackend(disponible);
     } catch (error) {
       // Fallback: three fuerza WebGL2 si WebGPU no está o init falla.
       this.backendActivo = "webgl";
       console.warn("[tres] WebGPU no disponible; se usa el backend WebGL2", error);
+    } finally {
+      // render() lanza si se llama antes de init(): el bucle espera este flag.
+      this.inicializado = true;
     }
   }
 
@@ -303,8 +327,12 @@ export class EscenaTres {
   }
 
   setCameraMode(modo: CameraMode): void {
-    this.modo = modo;
-    this.orbita = 0;
+    this.rig.setModo(modo);
+  }
+
+  /** Fuerza el encuadre de una fase (si no, se deriva de la telemetría). */
+  setFase(fase: Fase): void {
+    this.rig.setFase(fase);
   }
 
   /** Posición visual del dron (z already clamped al terreno real). */
@@ -336,6 +364,11 @@ export class EscenaTres {
     this.dronMesh?.rotation.set(-Math.PI / 2 + this.pitchFuselage, Math.PI + this.rumboActual, this.rollFuselage);
     for (const rotor of this.rotores) rotor.rotation.y += dt * 24;
 
+    // Halo pulsante y siempre de cara a cámara (el dron nunca deja de verse).
+    const pulso = 1 + 0.12 * Math.sin(performance.now() * 0.004);
+    this.halo.scale.setScalar(pulso);
+    this.halo.quaternion.copy(this.camara.quaternion);
+
     const cerca = posicion.distanceTo(this.lastTrailPoint ?? posicion);
     if (!this.lastTrailPoint || cerca >= TRAIL_MIN) {
       if (this.lastTrailPoint && posicion.distanceTo(this.lastTrailPoint) > 240) {
@@ -358,39 +391,15 @@ export class EscenaTres {
     const display = this.displayDron(sample);
     const agl = this.alturaSuelo(display);
     const objetivo = new THREE.Vector3(display[0], agl + display[2], display[1]);
-    if (this.modo === "chase") {
-      const lateral = 0.65 * Math.cos(this.rumboActual);
-      // El pad tiene edificios a ambos lados del dron: 22 m todavía puede
-      // acabar dentro de una huella al arrancar. 35 m deja un plano abierto.
-      const distancia = display[2] < 25 ? Math.max(this.dist, 35) : this.dist;
-      const suave = new THREE.Vector3(
-        objetivo.x - Math.sin(this.rumboActual) * distancia + lateral,
-        objetivo.y + 2.35 * (distancia / 8.6),
-        objetivo.z - Math.cos(this.rumboActual) * distancia - 0.65 * Math.sin(this.rumboActual),
-      );
-      this.camara.position.lerp(this.posicionSegura(objetivo, suave), 1 - Math.exp(-dt * 6));
-      this.camara.lookAt(objetivo);
-      return;
+    // La fase de la telemetría elige el encuadre (despegue/crucero/descenso/
+    // entregado); el rig siempre hace lookAt al dron. setFase() manda hasta
+    // que el vuelo cambie realmente de fase.
+    const fase = FASE_DE[sample.phase];
+    if (fase !== this.faseTelemetria) {
+      this.faseTelemetria = fase;
+      this.rig.setFase(fase);
     }
-    if (this.modo === "orbit") {
-      this.orbita += dt * 0.12;
-      const efectiva = Math.min(this.dist * 1.4, display[2] < 25 ? 11 : 80);
-      const deorb = new THREE.Vector3(
-        objetivo.x + Math.cos(this.orbita) * efectiva,
-        objetivo.y + 5.8 * (efectiva / 12.5) + 2,
-        objetivo.z + Math.sin(this.orbita) * efectiva,
-      );
-      this.camara.position.lerp(this.posicionSegura(objetivo, deorb), 0.25);
-      this.camara.lookAt(objetivo);
-      return;
-    }
-    if (this.modo === "top") {
-      const visto = new THREE.Vector3(objetivo.x, objetivo.y + this.dist * 10, objetivo.z - 0.01);
-      this.camara.position.lerp(this.posicionSegura(objetivo, visto), 0.08);
-      this.camara.lookAt(objetivo);
-      return;
-    }
-    this.camara.lookAt(objetivo);
+    this.rig.actualizar(objetivo, this.rumboActual, dt, display[2]);
   }
 
   /** Evita que la cámara atraviese edificios o baje bajo el terreno. */
@@ -413,7 +422,7 @@ export class EscenaTres {
   /** Bucle principal: minestro telemetría, misión, toma cinematográfica, render. */
   private readonly bucle = (): void => {
     requestAnimationFrame(this.bucle);
-    if (this.destruida) return;
+    if (this.destruida || !this.inicializado) return;
     try {
       const ahora = performance.now();
       const deltaMs = ahora - this.lastFrame;
