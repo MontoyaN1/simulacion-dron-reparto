@@ -79,6 +79,7 @@ export class EscenaTres {
   /** Rig de cámara: encuadre por fase y modos chase/orbit/top/free. */
   private readonly rig: RigCamara;
   private destruida = false;
+  private rafId = 0;
   private lastFrame = performance.now();
   private rumboActual = 0;
   private pitchFuselage = 0;
@@ -373,7 +374,15 @@ export class EscenaTres {
   /** Render con bloom si está activo, o render directo como fallback. */
   private renderEscena(): void {
     if (this.post && this.estadoVisual.bloom) {
-      this.post.render();
+      try {
+        this.post.render();
+      } catch {
+        // Red de seguridad: si el bloom TSL falla, se desactiva y se renderiza
+        // directo (sin bloom) para no dejar pantalla negra ni bucle de errores.
+        this.estadoVisual.bloom = false;
+        this.post = null;
+        this.renderer.render(this.mundo, this.camara);
+      }
     } else {
       this.renderer.render(this.mundo, this.camara);
     }
@@ -524,8 +533,9 @@ export class EscenaTres {
 
   /** Bucle principal: minestro telemetría, misión, toma cinematográfica, render. */
   private readonly bucle = (): void => {
-    requestAnimationFrame(this.bucle);
-    if (this.destruida || !this.inicializado) return;
+    if (this.destruida) return;
+    this.rafId = requestAnimationFrame(this.bucle);
+    if (!this.inicializado) return;
     try {
       const ahora = performance.now();
       const deltaMs = ahora - this.lastFrame;
@@ -587,7 +597,19 @@ export class EscenaTres {
   destroy(): void {
     if (this.destruida) return;
     this.destruida = true;
+    cancelAnimationFrame(this.rafId);
     this.resizeObs.disconnect();
+    // Liberar geometrías, materiales y texturas de GPU.
+    this.mundo.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.geometry?.dispose();
+        const mat = mesh.material;
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+        else mat?.dispose();
+      }
+    });
+    this.post?.dispose?.();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
