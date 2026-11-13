@@ -365,9 +365,13 @@ export class EscenaTres {
     for (const rotor of this.rotores) rotor.rotation.y += dt * 24;
 
     // Halo pulsante y siempre de cara a cámara (el dron nunca deja de verse).
+    // Tamaño compensado por distancia: el zoom 3–60 m no debe tragarse el dron.
+    const cercaCamara = this.camara.position.distanceTo(posicion);
+    const tamano = THREE.MathUtils.clamp(cercaCamara / 14, 0.5, 3.2);
     const pulso = 1 + 0.12 * Math.sin(performance.now() * 0.004);
-    this.halo.scale.setScalar(pulso);
-    this.halo.quaternion.copy(this.camara.quaternion);
+    this.halo.scale.setScalar(pulso * tamano);
+    this.etiqueta.scale.set(3.6 * tamano, 1.01 * tamano, 1);
+    this.etiqueta.position.y = 1.9 * tamano;
 
     const cerca = posicion.distanceTo(this.lastTrailPoint ?? posicion);
     if (!this.lastTrailPoint || cerca >= TRAIL_MIN) {
@@ -467,6 +471,9 @@ export class EscenaTres {
     this.sombraSuelo.position.set(display[0], aglDron + 0.25, display[1]);
     this.actualizarDron(sample, dt);
     this.camaraActualiza(sample, dt);
+    // El anillo se orienta a cámara DESPUÉS de moverla: con el orden inverso
+    // queda un frame desfasado y se ve el canto.
+    this.halo.quaternion.copy(this.camara.quaternion);
 
       this.renderer.render(this.mundo, this.camara);
     } catch (error) {
