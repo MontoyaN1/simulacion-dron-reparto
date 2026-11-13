@@ -270,6 +270,7 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
       ? new THREE.MeshBasicMaterial({ map: textura })
       : new THREE.MeshBasicMaterial({ color: 0x8fa9bf }),
   );
+  terreno.receiveShadow = true;
 
   // Edificios: si el fetch o la fusión fallan, la escena sigue sin ellos.
   const { geo: edifGeo, cuenta } = await edificiosFusionados(corredor).catch(
@@ -281,9 +282,14 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
   const edificios = edifGeo
     ? new THREE.Mesh(
         edifGeo,
-        new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }),
+        // Toon (anime) + vertexColors de la fusión; proyecta y recibe sombras.
+        new THREE.MeshToonMaterial({ vertexColors: true, side: THREE.DoubleSide }),
       )
     : null;
+  if (edificios) {
+    edificios.castShadow = true;
+    edificios.receiveShadow = true;
+  }
   const grupo = new THREE.Group();
   grupo.add(terreno);
   if (edificios) grupo.add(edificios);

@@ -1,8 +1,11 @@
 import * as THREE from "three";
-import { WebGPURenderer } from "three/webgpu";
+import { WebGPURenderer, PostProcessing } from "three/webgpu";
+import { pass } from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
 import { calcularFps, detectarBackend, webgpuDisponible, type Backend } from "./render";
+import { degradarPorFps, type EstadoVisual } from "./visual";
 import {
   CITY_GROUND_HEIGHT,
   COLORS,
@@ -46,6 +49,9 @@ export class EscenaTres {
   private inicializado = false;
   private readonly fpsDeltas: number[] = [];
   private fpsValor = 0;
+  private sol!: THREE.DirectionalLight;
+  private post: PostProcessing | null = null;
+  private readonly estadoVisual: EstadoVisual = { toon: true, sombras: true, bloom: true, nubes: true };
   private readonly mundo = new THREE.Scene();
   private readonly camara: THREE.PerspectiveCamera;
   private readonly contenedor: HTMLElement;
@@ -94,6 +100,10 @@ export class EscenaTres {
     // background, pero render() ya lo espera por sí mismo.
     this.renderer = new WebGPURenderer({ antialias: true, powerPreference: "high-performance" });
     void this.iniciarBackend();
+    // Sombras suaves (PCF) sobre el dron y los edificios. PCFSoftShadowMap está
+    // eliminado en WebGPU: se usa PCFShadowMap + shadow.radius.
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     // Presupuesto de píxeles: dpr alto en iGPU era la mitad del coste.
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
     this.renderer.setSize(Math.max(2, container.clientWidth), Math.max(2, container.clientHeight));
@@ -131,7 +141,19 @@ export class EscenaTres {
     const hemisferio = new THREE.HemisphereLight(0xcfe7ff, 0x4a5d33, 1.15);
     const sol = new THREE.DirectionalLight(0xfff2d6, 1.35);
     sol.position.set(-900, 1200, -1400);
+    // Sombras suaves: el sol proyecta y los edificios/terreno las reciben.
+    sol.castShadow = true;
+    sol.shadow.mapSize.set(1024, 1024);
+    sol.shadow.radius = 4;
+    sol.shadow.camera.near = 1;
+    sol.shadow.camera.far = 5000;
+    const alcance = 1200;
+    sol.shadow.camera.left = -alcance;
+    sol.shadow.camera.right = alcance;
+    sol.shadow.camera.top = alcance;
+    sol.shadow.camera.bottom = -alcance;
     this.mundo.add(hemisferio, sol, this.dron);
+    this.sol = sol;
 
     this.sombraSuelo = new THREE.Mesh(
       new THREE.CircleGeometry(0.9, 24),
@@ -255,6 +277,18 @@ export class EscenaTres {
       });
       this.dronMesh = modelo;
       this.dron.add(modelo);
+      // Toon: los materiales del GLB se convierten a MeshToonMaterial (anime).
+      if (this.estadoVisual.toon) {
+        modelo.traverse((nodo) => {
+          const malla = nodo as THREE.Mesh;
+          if (!malla.isMesh) return;
+          malla.castShadow = true;
+          const origen = malla.material as THREE.MeshLambertMaterial;
+          malla.material = new THREE.MeshToonMaterial({
+            color: origen?.color ?? new THREE.Color("#c08a52"),
+          });
+        });
+      }
       const carton = new THREE.MeshLambertMaterial({ color: "#c08a52" });
       const cinta = new THREE.MeshLambertMaterial({ color: "#9a6b39" });
       void carton;
@@ -264,8 +298,9 @@ export class EscenaTres {
       // Placeholder: un cuerpo simple para que el dron siga siendo visible.
       const cuerpo = new THREE.Mesh(
         new THREE.BoxGeometry(1.2, 0.35, 1.2),
-        new THREE.MeshLambertMaterial({ color: "#38bdf8" }),
+        new THREE.MeshToonMaterial({ color: "#38bdf8" }),
       );
+      cuerpo.castShadow = true;
       this.dronMesh = cuerpo;
       this.dron.add(cuerpo);
     }
@@ -287,6 +322,7 @@ export class EscenaTres {
       console.warn("[tres] WebGPU no disponible; se usa el backend WebGL2", error);
     } finally {
       // render() lanza si se llama antes de init(): el bucle espera este flag.
+      if (this.estadoVisual.bloom) this.crearPost();
       this.inicializado = true;
     }
   }
@@ -299,6 +335,62 @@ export class EscenaTres {
   /** FPS promediado de los últimos frames (0 antes del primer frame). */
   fps(): number {
     return this.fpsValor;
+  }
+
+  /** ¿El shader toon está activo? (identidad visual, nunca se degrada). */
+  toonActivo(): boolean {
+    return this.estadoVisual.toon;
+  }
+
+  /** ¿Las sombras están activas? */
+  sombrasActivas(): boolean {
+    return this.estadoVisual.sombras;
+  }
+
+  /** ¿El bloom está activo? */
+  bloomActivo(): boolean {
+    return this.estadoVisual.bloom;
+  }
+
+  /** Apaga el bloom (guarda de FPS). */
+  degradarBloom(): void {
+    this.estadoVisual.bloom = false;
+    this.post = null;
+    this.estadoVisual.toon = true;
+  }
+
+  /** Crea el RenderPipeline con bloom (umbral alto: solo emisivos). */
+  private crearPost(): void {
+    const escenaPass = pass(this.mundo, this.camara);
+    const colorEscena = escenaPass.getTextureNode("output");
+    // bloom(node<vec4>, strength, radius, threshold) — umbral 0.9 como desktop.
+    const bloomPass = bloom(colorEscena, 0.1, 0.0, 0.9);
+    this.post = new PostProcessing(this.renderer);
+    this.post.outputNode = colorEscena.add(bloomPass);
+  }
+
+  /** Render con bloom si está activo, o render directo como fallback. */
+  private renderEscena(): void {
+    if (this.post && this.estadoVisual.bloom) {
+      this.post.render();
+    } else {
+      this.renderer.render(this.mundo, this.camara);
+    }
+  }
+
+  /** Guarda de FPS: degrada capas visuales por debajo del mínimo. */
+  private aplicarGuardaFps(): void {
+    const antes = this.estadoVisual;
+    const despues = degradarPorFps(this.fpsValor, antes);
+    if (despues === antes) return;
+    if (antes.bloom && !despues.bloom) this.degradarBloom();
+    if (antes.sombras && !despues.sombras) {
+      this.estadoVisual.sombras = false;
+      this.sol.castShadow = false;
+      this.renderer.shadowMap.enabled = false;
+    }
+    this.estadoVisual.nubes = despues.nubes;
+    this.estadoVisual.toon = despues.toon;
   }
 
   attachBuffer(buffer: EscenaBuffer): void {
@@ -439,9 +531,10 @@ export class EscenaTres {
       this.fpsDeltas.push(deltaMs);
       if (this.fpsDeltas.length > 60) this.fpsDeltas.shift();
       this.fpsValor = calcularFps(this.fpsDeltas);
+      this.aplicarGuardaFps();
       const sample = this.buffer?.sample();
       if (!sample) {
-        this.renderer.render(this.mundo, this.camara);
+        this.renderEscena();
         return;
       }
 
@@ -478,7 +571,7 @@ export class EscenaTres {
     // queda un frame desfasado y se ve el canto.
     this.halo.quaternion.copy(this.camara.quaternion);
 
-      this.renderer.render(this.mundo, this.camara);
+      this.renderEscena();
     } catch (error) {
       // Un asset/capa async no puede matar el loop: el siguiente frame sigue
       // vivo y la consola conserva la causa para depuración.
