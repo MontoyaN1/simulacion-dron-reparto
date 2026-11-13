@@ -86,12 +86,13 @@ describe("SimulationStage · motor único", () => {
     expect(opciones.corredor).toBeInstanceOf(RouteGroundTable);
   });
 
-  it("ignora ?motor=cesium: sigue usando EscenaTres y una sola escena", () => {
+  it("ignora cualquier query ?motor= y usa siempre EscenaTres", () => {
     window.history.replaceState({}, "", "/?motor=cesium");
     montar();
 
     expect(construidas).toHaveLength(1);
     expect(construidas[0].opciones.corredor).toBeInstanceOf(RouteGroundTable);
+    window.history.replaceState({}, "", "/");
   });
 
   it("no muestra la etiqueta del motor retirado en el panel de fps", () => {
