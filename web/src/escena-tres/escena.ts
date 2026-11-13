@@ -49,6 +49,7 @@ export class EscenaTres {
   private inicializado = false;
   private readonly fpsDeltas: number[] = [];
   private fpsValor = 0;
+  private framesVistos = 0;
   private sol!: THREE.DirectionalLight;
   private post: PostProcessing | null = null;
   private readonly estadoVisual: EstadoVisual = { toon: true, sombras: true, bloom: true, nubes: true };
@@ -380,6 +381,9 @@ export class EscenaTres {
 
   /** Guarda de FPS: degrada capas visuales por debajo del mínimo. */
   private aplicarGuardaFps(): void {
+    // Calentamiento: los primeros 180 frames (~3 s) no degradan, para que la
+    // carga inicial (fetch de edificios, texturas) no dispare la guarda.
+    if (this.framesVistos < 180) return;
     const antes = this.estadoVisual;
     const despues = degradarPorFps(this.fpsValor, antes);
     if (despues === antes) return;
@@ -531,6 +535,7 @@ export class EscenaTres {
       this.fpsDeltas.push(deltaMs);
       if (this.fpsDeltas.length > 60) this.fpsDeltas.shift();
       this.fpsValor = calcularFps(this.fpsDeltas);
+      this.framesVistos += 1;
       this.aplicarGuardaFps();
       const sample = this.buffer?.sample();
       if (!sample) {
