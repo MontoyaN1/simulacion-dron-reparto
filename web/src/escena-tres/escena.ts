@@ -9,6 +9,7 @@ import {
   type CameraMode,
 } from "./constants";
 import { routeGroundHeight } from "./world";
+import { marcarDegradado } from "./estado";
 import type { RouteGroundTable } from "./route-ground";
 import type { MissionState } from "../mision/tipos";
 import { construirCiudad, enuATres } from "./ciudad";
@@ -233,7 +234,14 @@ export class EscenaTres {
       void carton;
       void cinta;
     } catch (error) {
-      console.warn("[tres] No se pudo cargar el dron", error);
+      marcarDegradado("el GLB del dron no cargó", error);
+      // Placeholder: un cuerpo simple para que el dron siga siendo visible.
+      const cuerpo = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2, 0.35, 1.2),
+        new THREE.MeshLambertMaterial({ color: "#38bdf8" }),
+      );
+      this.dronMesh = cuerpo;
+      this.dron.add(cuerpo);
     }
   }
 

@@ -4,6 +4,7 @@ import { geodeticToEnu, routeFrame, type Vec3 } from "@dron/shared";
 import rangeFootprintGrounds from "./ground-footprints.json";
 import { pointInside } from "./buildings";
 import { CITY_GROUND_HEIGHT } from "./constants";
+import { marcarDegradado } from "./estado";
 import type { RouteGroundTable } from "./route-ground";
 
 /** three.js usa Y-arriba: ENU (este, norte, arriba) → (x, y, z). */
@@ -248,7 +249,11 @@ export interface CiudadTres {
 /** Terreno con imagen horneada + edificios fusionados. */
 export const construirCiudad = async (corredor: RouteGroundTable): Promise<CiudadTres> => {
   const caja = cajaCorredor();
-  const textura = await texturaHorneada();
+  // Ortofoto: si no carga, placeholder gris-azulado sin textura.
+  const textura = await texturaHorneada().catch((error: unknown) => {
+    marcarDegradado("la ortofoto del terreno no cargó", error);
+    return null;
+  });
   const plana = cajaMosaico(caja);
 
   const malla = mallaTerreno(corredor);
@@ -261,10 +266,18 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
     malla,
     // La ortofoto es una textura de referencia, no depende de la iluminación
     // de la escena: MeshBasic evita que la ciudad desaparezca en sombra.
-    new THREE.MeshBasicMaterial({ map: textura }),
+    textura
+      ? new THREE.MeshBasicMaterial({ map: textura })
+      : new THREE.MeshBasicMaterial({ color: 0x8fa9bf }),
   );
 
-  const { geo: edifGeo, cuenta } = await edificiosFusionados(corredor);
+  // Edificios: si el fetch o la fusión fallan, la escena sigue sin ellos.
+  const { geo: edifGeo, cuenta } = await edificiosFusionados(corredor).catch(
+    (error: unknown) => {
+      marcarDegradado("los edificios OSM no cargaron", error);
+      return { geo: null, cuenta: 0 };
+    },
+  );
   const edificios = edifGeo
     ? new THREE.Mesh(
         edifGeo,
