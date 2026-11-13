@@ -7,9 +7,9 @@ import {
   GEAR_CLEARANCE,
   MISSION_ZONES,
   type CameraMode,
-} from "../cesium/constants";
-import { routeGroundHeight } from "../cesium/world";
-import type { RouteGroundTable } from "../cesium/route-ground";
+} from "./constants";
+import { routeGroundHeight } from "./world";
+import type { RouteGroundTable } from "./route-ground";
 import type { MissionState } from "../mision/tipos";
 import { construirCiudad, enuATres } from "./ciudad";
 import { MisionTres } from "./mision";
@@ -26,7 +26,7 @@ export interface EscenaTresOpciones {
   readonly corredor: RouteGroundTable;
 }
 
-/** Escena three.js del corredor. Contrato igual al de la escena de Cesium. */
+/** Escena three.js del corredor: único motor de render. */
 export class EscenaTres {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly mundo = new THREE.Scene();

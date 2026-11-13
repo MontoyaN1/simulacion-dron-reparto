@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClientCommand, SimulationStatus, Telemetry, Vec3 } from "@dron/shared";
-import { createWorldFrame } from "../cesium/world";
-import { CAMERA_MODES, type CameraMode } from "../cesium/constants";
-import { DroneScene } from "../cesium/scene";
+import { CAMERA_MODES, type CameraMode } from "../escena-tres/constants";
 import { MISSION_STATE_LABEL } from "../mision/tipos";
 import type { MissionState } from "../mision/tipos";
-import { RouteGroundTable } from "../cesium/route-ground";
+import { RouteGroundTable } from "../escena-tres/route-ground";
 import { EscenaTres } from "../escena-tres/escena";
 import type { TelemetryBuffer } from "../sim/buffer";
 import { PHASE_LABELS, fmt, fmtClock, fmtInt } from "../format";
@@ -23,15 +21,10 @@ const SPEEDS = [1, 2, 4] as const;
 
 export function SimulationStage({ buffer, route, telemetry, status, connected, send }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<DroneScene | EscenaTres | null>(null);
-  const sendRef = useRef(send);
+  const sceneRef = useRef<EscenaTres | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
   const [missionState, setMissionState] = useState<MissionState>("esperando");
-  const [sequenceHold, setSequenceHold] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
-  sendRef.current = send;
-
-  const motor = new URLSearchParams(window.location.search).get("motor") ?? "tres";
 
   useEffect(() => {
     let frames = 0;
@@ -54,33 +47,9 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const params = new URLSearchParams(window.location.search);
-    const motor = params.get("motor") ?? "tres";
-    const corredor = new RouteGroundTable();
-    // El archivo versionado de alturas cubre el corredor: el muestreo en
-    // vivo (ion) queda como respaldo y no necesita el token en el cliente.
-    void corredor.cargar({ world: createWorldFrame() });
-    let escenaActual: DroneScene | EscenaTres;
-    try {
-      escenaActual =
-        motor === "cesium"
-          ? new DroneScene(host)
-          : new EscenaTres(host, { corredor });
-    } catch (error) {
-      console.warn("[escena] El motor three falló; se usa Cesium", error);
-      escenaActual = new DroneScene(host);
-    }
-    const scene = escenaActual;
+    const scene = new EscenaTres(host, { corredor: new RouteGroundTable() });
     scene.attachBuffer(buffer);
     scene.attachMissionState((state) => setMissionState(state));
-    // Cesium lleva secuencia de personas y congela la simulación; three es
-    // misión continua y no la usa.
-    if ("attachHold" in scene) {
-      scene.attachHold((hold: boolean) => {
-        setSequenceHold(hold);
-        sendRef.current(hold ? { type: "pause" } : { type: "resume" });
-      });
-    }
 
     sceneRef.current = scene;
     return () => {
@@ -107,7 +76,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
           : "Iniciar vuelo";
 
   const handlePrimary = (): void => {
-    if (status.delivered || sequenceHold) return;
+    if (status.delivered) return;
     send({ type: running ? "pause" : "start" });
   };
 
@@ -124,7 +93,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
       </div>
 
       <div className="fps-panel" role="status">
-        <span className="fps-motor">{motor === "cesium" ? "Cesium" : "three"}</span>
+        <span className="fps-motor">three</span>
         <span className="fps-valor mono">{fps === null ? "—" : `${fps} fps`}</span>
       </div>
 
@@ -184,7 +153,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
             type="button"
             className="button button-primary"
             onClick={handlePrimary}
-            disabled={status.delivered || sequenceHold}
+            disabled={status.delivered}
           >
             {primaryLabel}
           </button>

@@ -202,17 +202,6 @@ main {
   inset: 0;
 }
 
-.stage-host .cesium-widget,
-.stage-host .cesium-widget canvas {
-  width: 100%;
-  height: 100%;
-}
-
-.stage-host .cesium-widget-credits {
-  font-size: 10px;
-  opacity: 0.55;
-}
-
 .stage-credits {
   position: absolute;
   right: 14px;
@@ -234,16 +223,6 @@ main {
 
 .stage-credits:hover {
   opacity: 0.9;
-}
-
-.stage-host .cesium-viewer-bottom {
-  z-index: 6;
-  right: 14px;
-  bottom: 4px;
-}
-
-.stage-host .cesium-widget-credits a {
-  color: #cbd5e1;
 }
 
 .stage-top {

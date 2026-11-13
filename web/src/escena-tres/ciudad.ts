@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { geodeticToEnu, routeFrame, type Vec3 } from "@dron/shared";
-import rangeFootprintGrounds from "../cesium/ground-footprints.json";
-import { pointInside } from "../cesium/buildings";
-import { CITY_GROUND_HEIGHT } from "../cesium/constants";
-import type { RouteGroundTable } from "../cesium/route-ground";
+import rangeFootprintGrounds from "./ground-footprints.json";
+import { pointInside } from "./buildings";
+import { CITY_GROUND_HEIGHT } from "./constants";
+import type { RouteGroundTable } from "./route-ground";
 
 /** three.js usa Y-arriba: ENU (este, norte, arriba) → (x, y, z). */
 export const enuATres = (enu: Vec3, aglSuelo = 0): THREE.Vector3 =>
