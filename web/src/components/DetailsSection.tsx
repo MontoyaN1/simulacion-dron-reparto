@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GeodeticPoint, LiveAlgebra, Mat3, Telemetry } from "@dron/shared";
-import { liveAlgebra, norm } from "@dron/shared";
+import { liveAlgebra, norm, routeFrame } from "@dron/shared";
 import { fmt, fmtInt, fmtVector } from "../format";
 import { DataTable } from "./DataTable";
+import { ModeloDocumentoCard } from "./ModeloDocumentoCard";
 
 type Triple = readonly [number, number, number];
 
@@ -411,6 +412,12 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
           </ul>
         </article>
       </section>
+      <div className="modelo-doc-section">
+        <ModeloDocumentoCard
+          rumboReal={frame?.bearingDeg ?? routeFrame.bearingDeg}
+          destinoReal={frame?.destinationAcademic ?? routeFrame.destinationAcademic}
+        />
+      </div>
       <div className="data-section">
         <DataTable telemetry={telemetry} />
       </div>

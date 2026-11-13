@@ -848,6 +848,90 @@ main {
   overflow-wrap: anywhere;
 }
 
+.modelo-doc-section {
+  margin-top: 14px;
+}
+
+.modelo-doc-legend,
+.modelo-doc-rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.2fr) minmax(0, 0.75fr);
+  gap: 4px 16px;
+  align-items: baseline;
+}
+
+.modelo-doc-legend {
+  margin: 0 0 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.modelo-doc-legend span:last-child {
+  color: #7dd3fc;
+}
+
+.modelo-doc-rows {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.modelo-doc-rows li {
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.modelo-doc-rows li:last-child {
+  border-bottom: none;
+}
+
+.modelo-doc .card-foot {
+  max-width: 72ch;
+}
+
+.modelo-doc-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.modelo-doc-doc {
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.modelo-doc-real {
+  color: #7dd3fc;
+  font-size: 0.78rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 820px) {
+  .modelo-doc-legend,
+  .modelo-doc-rows li {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .modelo-doc-label {
+    grid-column: 1 / -1;
+  }
+
+  .modelo-doc-legend .modelo-doc-label {
+    display: none;
+  }
+
+  .modelo-doc-real {
+    text-align: left;
+  }
+}
+
 .data-section {
   margin-top: 14px;
 }
