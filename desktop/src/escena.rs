@@ -1,23 +1,30 @@
 //! Escena 3D del corredor UTS→UIS: ortofoto horneada, 718 edificios OSM,
 //! dron y cámara perseguidora con colisión contra los edificios.
 
+use bevy::color::Alpha;
+use bevy::core_pipeline::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::ecs::name::Name;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
+use bevy::gltf::GltfMaterialName;
+use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::pbr::Atmosphere;
+use bevy::pbr::{Atmosphere, Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::alpha::AlphaMode;
-use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::render::mesh::{Indices, PrimitiveTopology};
+#[cfg(test)]
+use bevy::render::mesh::VertexAttributeValues;
 use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::Face;
-use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, Face, ShaderRef, TextureDimension, TextureFormat,
+};
 use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::EguiContexts;
 use parry3d_f64::math::{Isometry, Point, Vector};
 use parry3d_f64::query::{Ray, RayCast};
 use parry3d_f64::shape::TriMesh;
 
-use crate::nucleo::{Fase, MotorVuelo, VERTICAL_MS, ALTITUD_CRUCERO, ALTURA_ANCLA_MSNM};
+use crate::nucleo::{Fase, MotorVuelo, ALTITUD_CRUCERO, ALTURA_ANCLA_MSNM, VERTICAL_MS};
 
 pub(crate) const LON_UTS: f64 = -73.123524;
 pub(crate) const LAT_UTS: f64 = 7.1051164;
@@ -48,25 +55,31 @@ impl Plugin for EscenaPlugin {
         .insert_resource(Sentido::default())
         .init_resource::<Zonas>()
         .insert_resource(Vuelo::nuevo(ruta))
-            .insert_resource(corredor)
-            .init_resource::<ColisionEdificios>()
-            .init_resource::<Camara>()
-            .init_resource::<VelSim>()
-            .add_systems(Startup, construir_escena)
-            .add_systems(FixedUpdate, avanzar_vuelo)
-            .add_systems(
-                Update,
-                (
-                    aplicar_sentido,
-                    entrada_camara,
-                    seguir_dron,
-                    animar_dron,
-                    animar_rotores,
-                    parpadear_estrobo,
-                    pulso_marcas,
-                    poner_icono,
-                ),
-            );
+        .insert_resource(corredor)
+        .init_resource::<ColisionEdificios>()
+        .init_resource::<Camara>()
+        .init_resource::<VelSim>()
+        .add_plugins(MaterialPlugin::<ToonMaterial> {
+            prepass_enabled: false,
+            shadows_enabled: false,
+            ..default()
+        })
+        .add_systems(Startup, construir_escena)
+        .add_systems(FixedUpdate, avanzar_vuelo)
+        .add_systems(
+            Update,
+            (
+                aplicar_sentido,
+                entrada_camara,
+                seguir_dron,
+                convertir_materiales_dron,
+                animar_dron,
+                animar_rotores,
+                parpadear_estrobo,
+                pulso_marcas,
+                poner_icono,
+            ),
+        );
     }
 }
 
@@ -119,7 +132,8 @@ fn perfil_ruta(corredor: &Corredor, invertida: bool) -> Vec<[f64; 3]> {
         // Curva S suave: hasta ±20 m laterales, cero en los extremos.
         let lateral = 20.0 * (std::f64::consts::TAU * along / corredor.largo).sin();
         // Crucero a 50 m con dos etapas de altitud (±8 m) a lo largo.
-        let alt = ALTITUD_CRUCERO + 8.0 * (std::f64::consts::TAU * 2.0 * along / corredor.largo).sin();
+        let alt =
+            ALTITUD_CRUCERO + 8.0 * (std::f64::consts::TAU * 2.0 * along / corredor.largo).sin();
         let [este, norte] = corredor.punto(along, lateral);
         ruta.push([este, norte, corredor.agl(este, norte) + alt]);
     }
@@ -154,8 +168,16 @@ impl Vuelo {
     /// Posición visual suavizada entre los dos últimos pasos fijos.
     pub fn posicion_interpolada(&self, alfa: f32) -> Vec3 {
         // ENU (este, norte, arriba) → Bevy (x=este, y=arriba, z=norte).
-        let a = Vec3::new(self.anterior[0] as f32, self.anterior[2] as f32, self.anterior[1] as f32);
-        let b = Vec3::new(self.actual[0] as f32, self.actual[2] as f32, self.actual[1] as f32);
+        let a = Vec3::new(
+            self.anterior[0] as f32,
+            self.anterior[2] as f32,
+            self.anterior[1] as f32,
+        );
+        let b = Vec3::new(
+            self.actual[0] as f32,
+            self.actual[2] as f32,
+            self.actual[1] as f32,
+        );
         a.lerp(b, alfa.clamp(0.0, 1.0))
     }
 
@@ -229,9 +251,13 @@ impl MallaAltura {
     /// Altura bilineal interpolada; fuera de la rejilla se recorta al borde.
     fn altura(&self, along: f64, lateral: f64) -> f64 {
         let fa = ((along - self.along_min) / self.paso_along).clamp(0.0, (self.filas - 1) as f64);
-        let fb = ((lateral - self.lateral_min) / self.paso_lateral).clamp(0.0, (self.columnas - 1) as f64);
+        let fb = ((lateral - self.lateral_min) / self.paso_lateral)
+            .clamp(0.0, (self.columnas - 1) as f64);
         let (i0, j0) = (fa.floor() as usize, fb.floor() as usize);
-        let (i1, j1) = ((i0 + 1).min(self.filas - 1), (j0 + 1).min(self.columnas - 1));
+        let (i1, j1) = (
+            (i0 + 1).min(self.filas - 1),
+            (j0 + 1).min(self.columnas - 1),
+        );
         let (ta, tb) = (fa - i0 as f64, fb - j0 as f64);
         let v = |i: usize, j: usize| self.valores[i * self.columnas + j];
         let abajo = v(i0, j0) + (v(i0, j1) - v(i0, j0)) * tb;
@@ -337,7 +363,8 @@ impl Corredor {
         // Tabla v2: 50 m a lo largo x 75 m lateral, alturas en msnm.
         let texto = std::fs::read_to_string("assets/alturas-corredor.json")
             .expect("falta assets/alturas-corredor.json");
-        let json: serde_json::Value = serde_json::from_str(&texto).expect("json de alturas invalido");
+        let json: serde_json::Value =
+            serde_json::from_str(&texto).expect("json de alturas invalido");
         let filas = json["datos"]
             .as_array()
             .map(|d| d.iter().filter_map(|v| v[0].as_u64()).max().unwrap_or(0) as usize + 1)
@@ -353,7 +380,8 @@ impl Corredor {
                 dato[1].as_u64().unwrap_or(0) as usize,
             );
             if i < filas && j < columnas {
-                valores[i * columnas + j] = dato[2].as_f64().unwrap_or(ALTURA_ANCLA_MSNM) - ALTURA_ANCLA_MSNM;
+                valores[i * columnas + j] =
+                    dato[2].as_f64().unwrap_or(ALTURA_ANCLA_MSNM) - ALTURA_ANCLA_MSNM;
             }
         }
         MallaAltura {
@@ -449,7 +477,11 @@ fn enu_de(lat: f64, lon: f64) -> [f64; 2] {
     let ecef = |lat: f64, lon: f64| {
         let (la, lo) = (lat.to_radians(), lon.to_radians());
         let n = A / (1.0 - E2 * la.sin().powi(2)).sqrt();
-        [n * la.cos() * lo.cos(), n * la.cos() * lo.sin(), n * (1.0 - E2) * la.sin()]
+        [
+            n * la.cos() * lo.cos(),
+            n * la.cos() * lo.sin(),
+            n * (1.0 - E2) * la.sin(),
+        ]
     };
     let (p, o) = (ecef(lat, lon), ecef(LAT_UTS, LON_UTS));
     let (dx, dy, dz) = (p[0] - o[0], p[1] - o[1], p[2] - o[2]);
@@ -468,6 +500,8 @@ pub struct Camara {
     pos: Vec3,
     /// Orbita libre: el usuario se quedo la camara con el raton.
     pub libre: bool,
+    /// Vista cinematográfica opcional; no altera las otras dos ramas.
+    pub cine: bool,
     azim: f32,
     elev: f32,
     dist: f32,
@@ -475,11 +509,27 @@ pub struct Camara {
 
 impl Default for Camara {
     fn default() -> Self {
-        Camara { pos: Vec3::new(0.0, 420.0, 2000.0), libre: false, azim: 0.0, elev: 0.6, dist: 75.0 }
+        Camara {
+            pos: Vec3::new(0.0, 420.0, 2000.0),
+            libre: false,
+            cine: false,
+            azim: 0.0,
+            elev: 0.6,
+            dist: 75.0,
+        }
     }
 }
 
-/** Orbita libre: arrastrar = girar, rueda = zoom, R = volver al dron. */
+/// Encuadre frontal three-quarter: órbita pequeña y zoom heroico por
+/// distancia, sin tocar el FOV compartido con las demás vistas.
+fn offset_cine(t: f32, adelante: Vec3, lateral: Vec3) -> Vec3 {
+    let angulo = 0.55 + 0.22 * (t * 0.18).sin();
+    let distancia = 10.0 + 2.0 * (t * 0.11).sin();
+    let altura = 4.25 + 0.75 * (t * 0.23 + 1.0).sin();
+    (adelante * angulo.cos() + lateral * angulo.sin()) * distancia + Vec3::Y * altura
+}
+
+/** C = cine; arrastrar/rueda = órbita libre; R = persecución. */
 fn entrada_camara(
     mut camara: ResMut<Camara>,
     drones: Query<&Transform, With<Dron>>,
@@ -490,6 +540,12 @@ fn entrada_camara(
     mut egui: EguiContexts,
 ) {
     if teclado.just_pressed(KeyCode::KeyR) {
+        camara.libre = false;
+        camara.cine = false;
+        return;
+    }
+    if teclado.just_pressed(KeyCode::KeyC) {
+        camara.cine = !camara.cine;
         camara.libre = false;
         return;
     }
@@ -520,6 +576,7 @@ fn entrada_camara(
             camara.azim = rel.z.atan2(rel.x);
         }
         camara.libre = true;
+        camara.cine = false;
     }
 }
 
@@ -562,18 +619,32 @@ fn aplicar_sentido(
         vuelo.motor.telemetria().posicion[1],
     );
     if let Ok(cinta) = cintas.single() {
-        commands.entity(cinta).insert(Mesh3d(mallas.add(cinta_ruta(&ruta))));
+        commands
+            .entity(cinta)
+            .insert(Mesh3d(mallas.add(cinta_ruta(&ruta))));
     }
     // Azul siempre marca el origen; al invertir, UIS pasa a ser el origen.
     let (azul, verde) = (color_origen(), color_destino());
-    let (uts, uis) = if invertida { (verde, azul) } else { (azul, verde) };
+    let (uts, uis) = if invertida {
+        (verde, azul)
+    } else {
+        (azul, verde)
+    };
     if let Some((anillo, haz)) = zonas.uts {
-        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.55)));
-        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.22)));
+        commands
+            .entity(anillo)
+            .insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.55)));
+        commands
+            .entity(haz)
+            .insert(MeshMaterial3d(material_zona(&mut materiales, uts, 0.22)));
     }
     if let Some((anillo, haz)) = zonas.uis {
-        commands.entity(anillo).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.55)));
-        commands.entity(haz).insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.22)));
+        commands
+            .entity(anillo)
+            .insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.55)));
+        commands
+            .entity(haz)
+            .insert(MeshMaterial3d(material_zona(&mut materiales, uis, 0.22)));
     }
     if let Ok(mut ventana) = ventanas.single_mut() {
         ventana.title = format!("Dron {} · Estación de control", sentido.nombre());
@@ -591,11 +662,14 @@ fn construir_escena(
     vuelo: Res<Vuelo>,
     mut colision: ResMut<ColisionEdificios>,
 ) {
+    let matcap = imagenes.add(textura_matcap());
+    commands.insert_resource(MatcapDron(matcap));
+
     // Sol: la DirectionalLight brilla según el +Z de su transform, así que hay
     // que inclinarla; con el transform por defecto ilumina de lado y todo queda plano.
     commands.spawn((
         DirectionalLight {
-            color: Color::srgb(1.0, 0.97, 0.91),
+            color: Color::srgb(1.0, 0.92, 0.82),
             illuminance: 22_000.0,
             shadows_enabled: false,
             ..default()
@@ -695,9 +769,26 @@ fn construir_escena(
 
     // Anillos de salida (UTS) y llegada (UIS) con su haz vertical.
     // Azul = origen del vuelo, verde = destino (aplicar_sentido los intercambia).
-    let uts = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, [0.0, 0.0], color_origen());
-    let uis = spawn_zona(&mut commands, &mut mallas, &mut materiales, &corredor, corredor.desplazamiento, color_destino());
-    commands.insert_resource(Zonas { uts: Some(uts), uis: Some(uis) });
+    let uts = spawn_zona(
+        &mut commands,
+        &mut mallas,
+        &mut materiales,
+        &corredor,
+        [0.0, 0.0],
+        color_origen(),
+    );
+    let uis = spawn_zona(
+        &mut commands,
+        &mut mallas,
+        &mut materiales,
+        &corredor,
+        corredor.desplazamiento,
+        color_destino(),
+    );
+    commands.insert_resource(Zonas {
+        uts: Some(uts),
+        uis: Some(uis),
+    });
 
     // Capa de nubes: domo gigante a 20 km con textura horneada.
     if std::path::Path::new("assets/nubes.png").exists() {
@@ -719,16 +810,46 @@ fn construir_escena(
         // hdr: vista en buffer Rgba16Float; el cielo procedural (Bruneton)
         // de Bevy 0.16 solo funciona sobre buffer HDR. En 0.16 el campo
         // vive en la componente base Camera, no en Camera3d.
-        Camera { hdr: true, ..default() },
+        Camera {
+            hdr: true,
+            ..default()
+        },
         Camera3d::default(),
         Msaa::Off,
-        // Cielo procedural con sol (Bruneton): toma la luz de la
+        // Bloom moderado: solo emisivos y speculars altos del material toon.
+        Bloom {
+            intensity: 0.10,
+            prefilter: BloomPrefilter {
+                threshold: 0.9,
+                threshold_softness: 0.25,
+            },
+            composite_mode: BloomCompositeMode::Additive,
+            ..default()
+        },
+        ColorGrading {
+            global: ColorGradingGlobal {
+                post_saturation: 1.12,
+                ..default()
+            },
+            midtones: ColorGradingSection {
+                contrast: 1.05,
+                ..default()
+            },
+            ..default()
+        },        // Cielo procedural con sol (Bruneton): toma la luz de la
         // DirectionalLight de la escena; la bruma fisica hace de bruma.
         Atmosphere::default(),
-        Projection::Perspective(PerspectiveProjection { near: 0.5, far: 45_000.0, ..default() }),
+        Projection::Perspective(PerspectiveProjection {
+            near: 0.5,
+            far: 45_000.0,
+            ..default()
+        }),
         Transform::from_translation(vista).looking_at(objetivo, Vec3::Y),
     ));
-    commands.insert_resource(Camara { pos: vista, ..default() });
+    commands.insert_resource(Camara {
+        pos: vista,
+        ..default()
+    });
 }
 
 /** Zona de despegue/entrega: anillo en el suelo + haz vertical de 90 m.
@@ -743,16 +864,20 @@ fn spawn_zona(
 ) -> (Entity, Entity) {
     let suelo = corredor.agl(pos_enu[0], pos_enu[1]) as f32;
     let centro = Vec3::new(pos_enu[0] as f32, suelo + 0.3, pos_enu[1] as f32);
-    let anillo = commands.spawn((
-        ZonaMarcada,
-        Mesh3d(mallas.add(anillo(7.0, 11.0, 48))),
-        MeshMaterial3d(material_zona(materiales, color, 0.55)),
-        Transform::from_translation(centro),
-    )).id();
-    let haz = commands.spawn((
-        Mesh3d(mallas.add(haz_luz(centro, 90.0))),
-        MeshMaterial3d(material_zona(materiales, color, 0.22)),
-    )).id();
+    let anillo = commands
+        .spawn((
+            ZonaMarcada,
+            Mesh3d(mallas.add(anillo(7.0, 11.0, 48))),
+            MeshMaterial3d(material_zona(materiales, color, 0.55)),
+            Transform::from_translation(centro),
+        ))
+        .id();
+    let haz = commands
+        .spawn((
+            Mesh3d(mallas.add(haz_luz(centro, 90.0))),
+            MeshMaterial3d(material_zona(materiales, color, 0.22)),
+        ))
+        .id();
     (anillo, haz)
 }
 
@@ -769,15 +894,26 @@ fn cinta_ruta(ruta: &[[f64; 3]]) -> Mesh {
             }
         }
         const W: f64 = 0.9;
-        pos.push([(p[0] + lx * W) as f32, p[2] as f32 + 0.4, (p[1] + lz * W) as f32]);
-        pos.push([(p[0] - lx * W) as f32, p[2] as f32 + 0.4, (p[1] - lz * W) as f32]);
+        pos.push([
+            (p[0] + lx * W) as f32,
+            p[2] as f32 + 0.4,
+            (p[1] + lz * W) as f32,
+        ]);
+        pos.push([
+            (p[0] - lx * W) as f32,
+            p[2] as f32 + 0.4,
+            (p[1] - lz * W) as f32,
+        ]);
     }
     let mut indices = Vec::with_capacity(ruta.len().saturating_sub(1) * 6);
     for i in 0..ruta.len().saturating_sub(1) {
         let a = (i * 2) as u32;
         indices.extend_from_slice(&[a, a + 2, a + 1, a + 1, a + 2, a + 3]);
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     malla.insert_indices(Indices::U32(indices));
     malla
@@ -797,7 +933,10 @@ fn anillo(interior: f32, exterior: f32, segmentos: u32) -> Mesh {
         let a = i * 2;
         indices.extend_from_slice(&[a, a + 2, a + 1, a + 1, a + 2, a + 3]);
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     malla.insert_indices(Indices::U32(indices));
     malla
@@ -817,7 +956,10 @@ fn haz_luz(c: Vec3, alto: f32) -> Mesh {
         [c.x, y1, c.z - w],
     ];
     let indices = [0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.to_vec());
     malla.insert_indices(Indices::U32(indices.to_vec()));
     malla
@@ -849,7 +991,10 @@ fn domo_nubes(radio: f32, sectores: u32, capas: u32) -> Mesh {
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     malla.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     malla.insert_indices(Indices::U32(indices));
@@ -881,7 +1026,11 @@ fn color_destino() -> Color {
 }
 
 /// Material de zona: anillo (alfa 0.55) o haz vertical (alfa 0.22).
-fn material_zona(materiales: &mut Assets<StandardMaterial>, color: Color, alfa: f32) -> Handle<StandardMaterial> {
+fn material_zona(
+    materiales: &mut Assets<StandardMaterial>,
+    color: Color,
+    alfa: f32,
+) -> Handle<StandardMaterial> {
     let c = color.to_srgba();
     materiales.add(StandardMaterial {
         unlit: true,
@@ -895,7 +1044,11 @@ fn material_zona(materiales: &mut Assets<StandardMaterial>, color: Color, alfa: 
 /// Plano de presentación: el corredor en perspectiva, desde atrás y a la izquierda.
 fn vista_amplia(corredor: &Corredor) -> (Vec3, Vec3) {
     let [este, norte] = corredor.punto(-900.0, 220.0);
-    let posicion = Vec3::new(este as f32, corredor.agl(este, norte) as f32 + 190.0, norte as f32);
+    let posicion = Vec3::new(
+        este as f32,
+        corredor.agl(este, norte) as f32 + 190.0,
+        norte as f32,
+    );
     let [e2, n2] = corredor.punto(1100.0, 0.0);
     (posicion, Vec3::new(e2 as f32, 25.0, n2 as f32))
 }
@@ -932,12 +1085,19 @@ fn malla_terreno(corredor: &Corredor) -> Mesh {
     }
     let mut normales = vec![[0.0_f32; 3]; posiciones.len()];
     for tri in indices.chunks_exact(3) {
-        let n = normal_de(posiciones[tri[0] as usize], posiciones[tri[1] as usize], posiciones[tri[2] as usize]);
+        let n = normal_de(
+            posiciones[tri[0] as usize],
+            posiciones[tri[1] as usize],
+            posiciones[tri[2] as usize],
+        );
         for &i in tri {
             normales[i as usize] = n;
         }
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, posiciones);
     malla.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normales);
     malla.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -999,7 +1159,10 @@ fn malla_relieve(
             normales[i as usize] = n;
         }
     }
-    let mut malla = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut malla = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     malla.insert_attribute(Mesh::ATTRIBUTE_POSITION, posiciones);
     malla.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normales);
     malla.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -1057,13 +1220,7 @@ impl Acumulador {
         }
     }
 
-    fn vertice(
-        &mut self,
-        p: [f32; 3],
-        normal: [f32; 3],
-        color: [f32; 4],
-        uv: [f32; 2],
-    ) -> u32 {
+    fn vertice(&mut self, p: [f32; 3], normal: [f32; 3], color: [f32; 4], uv: [f32; 2]) -> u32 {
         let indice = self.posiciones.len() as u32;
         self.posiciones.push(p);
         self.normales.push(normal);
@@ -1232,12 +1389,20 @@ fn eje_largo(plano: &[[f64; 2]]) -> ([f64; 2], [f64; 2], f64, f64) {
         if l < 1e-9 {
             continue;
         }
-        let (ux, uy) = if dx < 0.0 { (-dx / l, -dy / l) } else { (dx / l, dy / l) };
+        let (ux, uy) = if dx < 0.0 {
+            (-dx / l, -dy / l)
+        } else {
+            (dx / l, dy / l)
+        };
         ex += ux * l;
         ey += uy * l;
     }
     let m = ex.hypot(ey);
-    let dir = if m < 1e-9 { [1.0, 0.0] } else { [ex / m, ey / m] };
+    let dir = if m < 1e-9 {
+        [1.0, 0.0]
+    } else {
+        [ex / m, ey / m]
+    };
     let (mut largo, mut ancho) = (0.0f64, 0.0f64);
     for p in plano {
         let dx = p[0] - c[0];
@@ -1249,7 +1414,13 @@ fn eje_largo(plano: &[[f64; 2]]) -> ([f64; 2], [f64; 2], f64, f64) {
 }
 
 /// Huella escalada alrededor de su centroide y corrida `off` m por el eje largo.
-fn escalar(plano: &[[f64; 2]], centro: &[f64; 2], dir: &[f64; 2], s: f64, off: f64) -> Vec<[f64; 2]> {
+fn escalar(
+    plano: &[[f64; 2]],
+    centro: &[f64; 2],
+    dir: &[f64; 2],
+    s: f64,
+    off: f64,
+) -> Vec<[f64; 2]> {
     plano
         .iter()
         .map(|p| {
@@ -1267,7 +1438,12 @@ fn rect(c: [f64; 2], dir: [f64; 2], largo: f64, ancho: f64) -> Vec<[f64; 2]> {
     let (hl, ha) = (largo / 2.0, ancho / 2.0);
     [[-hl, -ha], [hl, -ha], [hl, ha], [-hl, ha]]
         .iter()
-        .map(|[u, v]| [c[0] + dir[0] * u + perp[0] * v, c[1] + dir[1] * u + perp[1] * v])
+        .map(|[u, v]| {
+            [
+                c[0] + dir[0] * u + perp[0] * v,
+                c[1] + dir[1] * u + perp[1] * v,
+            ]
+        })
         .collect()
 }
 
@@ -1284,18 +1460,28 @@ fn orientar(n: [f32; 3], hacia: [f32; 3]) -> [f32; 3] {
 fn cuad_colision(malla: &mut Acumulador, vertices: &[[f32; 3]; 4]) {
     let inicio = malla.colision_vertices.len() as u32;
     for p in vertices {
-        malla.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        malla
+            .colision_vertices
+            .push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
     }
-    malla.colision_indices.push([inicio, inicio + 1, inicio + 2]);
-    malla.colision_indices.push([inicio, inicio + 2, inicio + 3]);
+    malla
+        .colision_indices
+        .push([inicio, inicio + 1, inicio + 2]);
+    malla
+        .colision_indices
+        .push([inicio, inicio + 2, inicio + 3]);
 }
 
 fn tri_colision(malla: &mut Acumulador, vertices: &[[f32; 3]; 3]) {
     let inicio = malla.colision_vertices.len() as u32;
     for p in vertices {
-        malla.colision_vertices.push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        malla
+            .colision_vertices
+            .push(Point::new(p[0] as f64, p[1] as f64, p[2] as f64));
     }
-    malla.colision_indices.push([inicio, inicio + 1, inicio + 2]);
+    malla
+        .colision_indices
+        .push([inicio, inicio + 1, inicio + 2]);
 }
 
 /// Prisma con fachada texturizada (UV métricos: u = largo del borde / bahía,
@@ -1334,9 +1520,21 @@ fn emitir_edificio(
         earcut.earcut_slice(plano, &[] as &[u32], triangulos);
         for tri in triangulos.chunks_exact(3) {
             let puntos = [
-                [plano[tri[0] as usize][0] as f32, base + alto, plano[tri[0] as usize][1] as f32],
-                [plano[tri[1] as usize][0] as f32, base + alto, plano[tri[1] as usize][1] as f32],
-                [plano[tri[2] as usize][0] as f32, base + alto, plano[tri[2] as usize][1] as f32],
+                [
+                    plano[tri[0] as usize][0] as f32,
+                    base + alto,
+                    plano[tri[0] as usize][1] as f32,
+                ],
+                [
+                    plano[tri[1] as usize][0] as f32,
+                    base + alto,
+                    plano[tri[1] as usize][1] as f32,
+                ],
+                [
+                    plano[tri[2] as usize][0] as f32,
+                    base + alto,
+                    plano[tri[2] as usize][1] as f32,
+                ],
             ];
             let ids = [
                 malla.vertice(puntos[0], [0.0, 1.0, 0.0], techo_color, UV_MURO),
@@ -1438,7 +1636,9 @@ fn torre_ocre(
             6.0,
             3.5,
         );
-        emitir_edificio(malla, earcut, triangulos, &nucleo, base, alto, gris, gris, 3.0, true);
+        emitir_edificio(
+            malla, earcut, triangulos, &nucleo, base, alto, gris, gris, 3.0, true,
+        );
     }
     // Caja de azotea.
     let caja = rect(c, dir, 8.0, 5.0);
@@ -1557,16 +1757,7 @@ fn casona(
     let teja = srgb(SRGB_TERRACOTA);
     let (c, dir, largo, ancho) = eje_largo(plano);
     emitir_edificio(
-        malla,
-        earcut,
-        triangulos,
-        plano,
-        base,
-        alto,
-        crema,
-        crema,
-        3.0,
-        false,
+        malla, earcut, triangulos, plano, base, alto, crema, crema, 3.0, false,
     );
     let alero = base + alto;
     let cab = alero + 1.7;
@@ -1628,12 +1819,20 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
     let mut malla = Acumulador::new();
     let mut earcut = earcut::Earcut::<f64>::new();
     let mut triangulos: Vec<u32> = Vec::new();
-    for (orden, feature) in json["features"].as_array().into_iter().flatten().enumerate() {
+    for (orden, feature) in json["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let geom = &feature["geometry"];
         if geom["type"] != "Polygon" {
             continue;
         }
-        let anillo = geom["coordinates"][0].as_array().cloned().unwrap_or_default();
+        let anillo = geom["coordinates"][0]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         if anillo.len() < 4 {
             continue;
         }
@@ -1809,36 +2008,19 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
                     true,
                 );
             }
-            Clase::Ocre => torre_ocre(
-                &mut malla,
-                &mut earcut,
-                &mut triangulos,
-                &plano,
-                base,
-                alto,
-            ),
-            Clase::Planetario => planeta(
-                &mut malla,
-                &mut earcut,
-                &mut triangulos,
-                &plano,
-                base,
-            ),
-            Clase::Casona => casona(
-                &mut malla,
-                &mut earcut,
-                &mut triangulos,
-                &plano,
-                base,
-                alto,
-            ),
+            Clase::Ocre => torre_ocre(&mut malla, &mut earcut, &mut triangulos, &plano, base, alto),
+            Clase::Planetario => planeta(&mut malla, &mut earcut, &mut triangulos, &plano, base),
+            Clase::Casona => casona(&mut malla, &mut earcut, &mut triangulos, &plano, base, alto),
         }
     }
 
     if malla.posiciones.is_empty() || malla.colision_indices.is_empty() {
         return (None, None);
     }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, malla.posiciones);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, malla.normales);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, malla.colores);
@@ -1851,7 +2033,11 @@ fn malla_edificios(corredor: &Corredor) -> (Option<Mesh>, Option<TriMesh>) {
 fn normal_de(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
     let m = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if m < 1e-6 {
         [0.0, 1.0, 0.0]
@@ -1876,6 +2062,132 @@ fn punto_dentro(p: &[f64; 2], anillo: &[[f64; 2]]) -> bool {
     dentro
 }
 
+#[derive(Resource, Clone)]
+struct MatcapDron(Handle<Image>);
+
+// `concat_assert!` de encase genera funciones const de comprobación que
+// Rust marca como dead_code; el módulo limita ese allow a este uniform.
+#[allow(dead_code)]
+mod toon_gpu {
+    use bevy::prelude::Vec4;
+    use bevy::render::render_resource::ShaderType;
+
+    #[derive(Clone, Copy, Debug, ShaderType)]
+    pub struct ToonUniform {
+        pub color: Vec4,
+        pub emissive: Vec4,
+        // x = metallic, y = roughness, z = unlit.
+        pub params: Vec4,
+    }
+}
+use toon_gpu::ToonUniform;
+
+/// Cel-shading local del dron: tres bandas de luz y matcap para el metal.
+/// La ciudad conserva StandardMaterial y su render PBR habitual.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct ToonMaterial {
+    #[uniform(0)]
+    uniform: ToonUniform,
+    #[texture(1)]
+    #[sampler(2)]
+    matcap: Handle<Image>,
+    alpha_mode: AlphaMode,
+}
+
+impl Material for ToonMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "toon.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        self.alpha_mode
+    }
+}
+
+/// Matcap procedural: foco cálido arriba-izquierda, sombra azul y orilla cyan.
+/// Es un reflejo estilizado barato, no un IBL fotorrealista.
+fn textura_matcap() -> Image {
+    const M: usize = 128;
+    let luz = Vec3::new(-0.45, 0.65, 0.80).normalize();
+    let mut datos = vec![0u8; M * M * 4];
+    for y in 0..M {
+        for x in 0..M {
+            let nx = (x as f32 + 0.5) / (M as f32 / 2.0) - 1.0;
+            let ny = (y as f32 + 0.5) / (M as f32 / 2.0) - 1.0;
+            let r2 = nx * nx + ny * ny;
+            let i = (y * M + x) * 4;
+            let color = if r2 > 1.0 {
+                [8.0, 12.0, 22.0]
+            } else {
+                let n = Vec3::new(nx, -ny, (1.0 - r2).sqrt()).normalize_or_zero();
+                let difusa = n.dot(luz).max(0.0);
+                let foco = difusa.powf(24.0);
+                let orilla = (1.0 - n.z).powf(2.0);
+                let base = 24.0 + 52.0 * difusa + 175.0 * foco;
+                [
+                    base + 20.0 * orilla,
+                    base + 8.0 + 45.0 * orilla,
+                    base + 22.0 + 70.0 * orilla,
+                ]
+            };
+            for canal in 0..3 {
+                datos[i + canal] = color[canal].clamp(0.0, 255.0) as u8;
+            }
+            datos[i + 3] = 255;
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: M as u32,
+            height: M as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        datos,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
+}
+
+/// Reemplaza solo los materiales del GLB del dron. `Estela` queda estándar
+/// porque su alfa se anima cada frame y no necesita el modelo de luz toon.
+fn convertir_materiales_dron(
+    mut commands: Commands,
+    matcap: Res<MatcapDron>,
+    estandar: Res<Assets<StandardMaterial>>,
+    mut toon: ResMut<Assets<ToonMaterial>>,
+    consulta: Query<(Entity, &GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (entidad, nombre, manejador) in &consulta {
+        if nombre.0 == "Estela" {
+            continue;
+        }
+        let Some(original) = estandar.get(&manejador.0) else {
+            continue;
+        };
+        let color = original.base_color.to_linear();
+        let emissive = original.emissive;
+        let material = ToonMaterial {
+            uniform: ToonUniform {
+                color: Vec4::new(color.red, color.green, color.blue, color.alpha),
+                emissive: Vec4::new(emissive.red, emissive.green, emissive.blue, emissive.alpha),
+                params: Vec4::new(
+                    original.metallic,
+                    original.perceptual_roughness,
+                    if original.unlit { 1.0 } else { 0.0 },
+                    0.0,
+                ),
+            },
+            matcap: matcap.0.clone(),
+            alpha_mode: original.alpha_mode,
+        };
+        commands
+            .entity(entidad)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert(MeshMaterial3d(toon.add(material)));
+    }
+}
+
 #[derive(Component)]
 struct Dron;
 
@@ -1897,6 +2209,24 @@ fn seguir_dron(
     let Ok(mut trasform_camara) = camaras.single_mut() else {
         return;
     };
+
+    if camara.cine {
+        let adelante = Vec3::new(corredor.dir[0] as f32, 0.0, corredor.dir[1] as f32);
+        let lateral = Vec3::new(corredor.lado[0] as f32, 0.0, corredor.lado[1] as f32);
+        let candidato = pos + offset_cine(tiempo.elapsed_secs(), adelante, lateral);
+        let desde = pos + Vec3::Y * 1.2;
+        let mut elegido = candidato;
+        if let Some(toi) = golpe_de(&colision.0, desde, candidato) {
+            elegido = desde + (candidato - desde).normalize() * ((toi as f32 - 1.2).max(1.5));
+        }
+        let suavizado = 1.0 - (-4.0 * tiempo.delta_secs()).exp();
+        camara.pos = camara.pos.lerp(elegido, suavizado);
+        let suelo = corredor.agl(camara.pos.x as f64, camara.pos.z as f64) as f32;
+        camara.pos.y = camara.pos.y.max(suelo + 2.0);
+        trasform_camara.translation = camara.pos;
+        trasform_camara.look_at(pos + Vec3::Y * 1.0, Vec3::Y);
+        return;
+    }
 
     if camara.libre {
         // Orbita libre alrededor del dron, con el mismo recorte de colision.
@@ -2015,8 +2345,7 @@ fn animar_dron(
     let v_lat = m.vel[0] * rumbo.cos() - m.vel[1] * rumbo.sin();
     // Cabeceo: morro abajo con velocidad (referencia) + leve morro arriba al
     // ascender y abajo al descender.
-    let objetivo_pitch = -(vel_h * 0.009).min(0.2)
-        + (vel_z / VERTICAL_MS).clamp(-1.0, 1.0) * 0.15;
+    let objetivo_pitch = -(vel_h * 0.009).min(0.2) + (vel_z / VERTICAL_MS).clamp(-1.0, 1.0) * 0.15;
     let objetivo_roll = (v_lat * 0.35).clamp(-0.30, 0.30);
     let en_aire = matches!(m.fase, Fase::Despegue | Fase::Crucero | Fase::Descenso);
     let mezcla = (1.0 - (-6.0 * tiempo.delta_secs_f64()).exp()) as f32;
@@ -2063,17 +2392,29 @@ fn estrobo_visible(fase_segundo: f64) -> bool {
     fase_segundo < 0.06 || (fase_segundo >= 0.15 && fase_segundo < 0.21)
 }
 
+fn estela_visible(rpm: f32) -> bool {
+    rpm >= 1.5
+}
+
+/// Motion blur local y barato: alfa máximo 0.20, nunca un disco opaco.
+fn estela_alfa(rpm: f32) -> f32 {
+    ((rpm - 1.5) / 4.0).clamp(0.0, 1.0) * 0.20
+}
+
 /**
  * Giro de los rotores por código. La animación embebida del GLB no se evalúa
  * en Bevy 0.16 (el loader de glTF no cablea un AnimationGraph a la escena;
  * solo Cesium la reproduce), así que aquí giramos los nodos Rotor1..4 del GLB
  * directamente: régimen variable con la velocidad, rampa de arranque/aterrizaje
- * y giro alternado por motor.
+ * y giro alternado por motor. EstelaN comparte el ángulo de RotorN y añade
+ * la persistencia visual ligera de las aspas.
  */
 fn animar_rotores(
     tiempo: Res<Time>,
     vuelo: Res<Vuelo>,
-    mut rotores: Query<(&mut Transform, &Name)>,
+    mut materiales: ResMut<Assets<StandardMaterial>>,
+    mut rotores: Query<(&mut Transform, &Name, &mut Visibility)>,
+    materiales_estela: Query<(&GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
     mut estado: Local<(f32, [f32; 4], bool)>,
 ) {
     let m = vuelo.motor.telemetria();
@@ -2088,19 +2429,41 @@ fn animar_rotores(
         *informado = true;
     }
     let giro = *rpm * std::f32::consts::TAU * dt as f32;
-    for (mut tras, nombre) in &mut rotores {
-        let Some(n) = nombre
-            .as_str()
-            .strip_prefix("Rotor")
-            .and_then(|s| s.parse::<usize>().ok())
-        else {
+    for n in 1..=4 {
+        angulos[n - 1] = (angulos[n - 1] + dir_rotor(n) * giro) % std::f32::consts::TAU;
+    }
+    // El loader pone el material en la entidad hija de la malla, no en el
+    // nodo EstelaN que acabamos de rotar.
+    for (nombre, MeshMaterial3d(manejador)) in &materiales_estela {
+        if nombre.0 == "Estela" {
+            if let Some(estela) = materiales.get_mut(manejador) {
+                estela.base_color.set_alpha(estela_alfa(*rpm));
+            }
+        }
+    }
+    for (mut tras, nombre, mut vis) in &mut rotores {
+        let texto = nombre.as_str();
+        let (sufijo, es_estela) = if let Some(s) = texto.strip_prefix("Rotor") {
+            (s, false)
+        } else if let Some(s) = texto.strip_prefix("Estela") {
+            (s, true)
+        } else {
+            continue;
+        };
+        let Ok(n) = sufijo.parse::<usize>() else {
             continue;
         };
         if !(1..=4).contains(&n) {
             continue;
         }
-        angulos[n - 1] = (angulos[n - 1] + dir_rotor(n) * giro) % std::f32::consts::TAU;
         tras.rotation = Quat::from_rotation_z(angulos[n - 1]);
+        if es_estela {
+            *vis = if estela_visible(*rpm) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
     }
 }
 
@@ -2137,9 +2500,11 @@ fn poner_icono(
     let Some(imagen) = imagenes.get(&server.load::<Image>("icono.png")) else {
         return;
     };
-    let Ok(icono) =
-        winit::window::Icon::from_rgba(imagen.data.clone().unwrap_or_default(), imagen.width(), imagen.height())
-    else {
+    let Ok(icono) = winit::window::Icon::from_rgba(
+        imagen.data.clone().unwrap_or_default(),
+        imagen.width(),
+        imagen.height(),
+    ) else {
         return;
     };
     let Some(ventana) = ventanas.single().ok().and_then(|e| winit.get_window(e)) else {
@@ -2158,7 +2523,10 @@ mod pruebas_edificios {
         let img = textura_fachada();
         assert_eq!(img.texture_descriptor.size.width, 128);
         assert_eq!(img.texture_descriptor.size.height, 128);
-        assert!(img.texture_descriptor.mip_level_count > 1, "cadena de mipmaps");
+        assert!(
+            img.texture_descriptor.mip_level_count > 1,
+            "cadena de mipmaps"
+        );
         let d = img.data.as_ref().unwrap();
         let px = |x: usize, y: usize| -> [u8; 3] {
             let i = (y * 128 + x) * 4;
@@ -2190,26 +2558,64 @@ mod pruebas_edificios {
     fn clasifica_landmarks_y_gatea_por_distancia() {
         let destino = [100.0, 200.0]; // ancla UIS en ENU (la UTS es el origen)
         assert_eq!(
-            clasificar(Some("(UIS 9) Facultad de Ciencias Humanas 2"), &[102.0, 201.0], 27.0, &destino),
+            clasificar(
+                Some("(UIS 9) Facultad de Ciencias Humanas 2"),
+                &[102.0, 201.0],
+                27.0,
+                &destino
+            ),
             Clase::Ocre
         );
         // mismo nombre, pero a 1.6 km de la UIS: no es landmark
         assert_eq!(
-            clasificar(Some("(UIS 9) Facultad de Ciencias Humanas 2"), &[1600.0, 200.0], 27.0, &destino),
+            clasificar(
+                Some("(UIS 9) Facultad de Ciencias Humanas 2"),
+                &[1600.0, 200.0],
+                27.0,
+                &destino
+            ),
             Clase::Normal
         );
-        assert_eq!(clasificar(Some("Planetario UIS"), &[110.0, 205.0], 8.0, &destino), Clase::Planetario);
-        assert_eq!(clasificar(Some("(UIS 8) Casona La Perla"), &[105.0, 195.0], 3.0, &destino), Clase::Casona);
-        assert_eq!(clasificar(Some("(UIS 12) Biblioteca"), &[103.0, 202.0], 15.0, &destino), Clase::Herencia);
+        assert_eq!(
+            clasificar(Some("Planetario UIS"), &[110.0, 205.0], 8.0, &destino),
+            Clase::Planetario
+        );
+        assert_eq!(
+            clasificar(
+                Some("(UIS 8) Casona La Perla"),
+                &[105.0, 195.0],
+                3.0,
+                &destino
+            ),
+            Clase::Casona
+        );
+        assert_eq!(
+            clasificar(Some("(UIS 12) Biblioteca"), &[103.0, 202.0], 15.0, &destino),
+            Clase::Herencia
+        );
         // la Biblioteca Pública Gabriel Turbay (1.6 km) no es campus
         assert_eq!(
-            clasificar(Some("Biblioteca Pública Gabriel Turbay"), &[1500.0, 200.0], 20.7, &destino),
+            clasificar(
+                Some("Biblioteca Pública Gabriel Turbay"),
+                &[1500.0, 200.0],
+                20.7,
+                &destino
+            ),
             Clase::Normal
         );
-        assert_eq!(clasificar(None, &[40.0, 10.0], 33.5, &destino), Clase::TorreUts);
+        assert_eq!(
+            clasificar(None, &[40.0, 10.0], 33.5, &destino),
+            Clase::TorreUts
+        );
         assert_eq!(clasificar(None, &[100.0, 30.0], 17.5, &destino), Clase::Uts);
-        assert_eq!(clasificar(None, &[2000.0, 2000.0], 65.0, &destino), Clase::Normal);
-        assert_eq!(clasificar(Some("(UIS 35) EDIC"), &[120.0, 210.0], 20.7, &destino), Clase::Institucional);
+        assert_eq!(
+            clasificar(None, &[2000.0, 2000.0], 65.0, &destino),
+            Clase::Normal
+        );
+        assert_eq!(
+            clasificar(Some("(UIS 35) EDIC"), &[120.0, 210.0], 20.7, &destino),
+            Clase::Institucional
+        );
     }
 
     #[test]
@@ -2230,7 +2636,10 @@ mod pruebas_edificios {
         let (u_max, v_max) = uvs
             .iter()
             .fold((0.0f32, 0.0f32), |(mu, mv), &[u, v]| (mu.max(u), mv.max(v)));
-        assert!(u_max > 4.0, "fachadas anchas repiten bahías (u_max={u_max})");
+        assert!(
+            u_max > 4.0,
+            "fachadas anchas repiten bahías (u_max={u_max})"
+        );
         assert!(v_max > 1.0, "edificios altos repiten pisos (v_max={v_max})");
 
         // Los landmarks dejaron su color lineal en los vértices de la malla.
@@ -2242,15 +2651,35 @@ mod pruebas_edificios {
         let lin = |s: f32| s.powf(2.2);
         let cuenta = |r: f32, g: f32, b: f32| -> usize {
             cols.iter()
-                .filter(|c| (c[0] - r).abs() < 0.02 && (c[1] - g).abs() < 0.02 && (c[2] - b).abs() < 0.02)
+                .filter(|c| {
+                    (c[0] - r).abs() < 0.02 && (c[1] - g).abs() < 0.02 && (c[2] - b).abs() < 0.02
+                })
                 .count()
         };
-        assert!(cuenta(lin(0.78), lin(0.58), lin(0.36)) >= 24, "torre ocre UIS");
-        assert!(cuenta(lin(0.64), lin(0.46), lin(0.36)) >= 24, "biblioteca en ladrillo");
-        assert!(cuenta(lin(0.84), lin(0.80), lin(0.72)) >= 12, "casona crema");
-        assert!(cuenta(lin(0.60), lin(0.34), lin(0.24)) >= 6, "teja terracota");
-        assert!(cuenta(lin(0.60), lin(0.63), lin(0.68)) >= 100, "cúpula del planetario");
-        assert!(cuenta(lin(0.30), lin(0.48), lin(0.72)) >= 16, "coronas azules UTS");
+        assert!(
+            cuenta(lin(0.78), lin(0.58), lin(0.36)) >= 24,
+            "torre ocre UIS"
+        );
+        assert!(
+            cuenta(lin(0.64), lin(0.46), lin(0.36)) >= 24,
+            "biblioteca en ladrillo"
+        );
+        assert!(
+            cuenta(lin(0.84), lin(0.80), lin(0.72)) >= 12,
+            "casona crema"
+        );
+        assert!(
+            cuenta(lin(0.60), lin(0.34), lin(0.24)) >= 6,
+            "teja terracota"
+        );
+        assert!(
+            cuenta(lin(0.60), lin(0.63), lin(0.68)) >= 100,
+            "cúpula del planetario"
+        );
+        assert!(
+            cuenta(lin(0.30), lin(0.48), lin(0.72)) >= 16,
+            "coronas azules UTS"
+        );
     }
 
     #[test]
@@ -2260,16 +2689,23 @@ mod pruebas_edificios {
         let i = perfil_ruta(&c, true);
         // extremos: origen/destino intercambiados (suelo de cada campus)
         assert!((f[0][0] - 0.0).abs() < 1e-6 && (f[0][1] - 0.0).abs() < 1e-6);
-        assert!((i[0][0] - c.desplazamiento[0]).abs() < 1e-6
-            && (i[0][1] - c.desplazamiento[1]).abs() < 1e-6);
-        assert!((i.last().unwrap()[0] - 0.0).abs() < 1e-6
-            && (i.last().unwrap()[1] - 0.0).abs() < 1e-6);
+        assert!(
+            (i[0][0] - c.desplazamiento[0]).abs() < 1e-6
+                && (i[0][1] - c.desplazamiento[1]).abs() < 1e-6
+        );
+        assert!(
+            (i.last().unwrap()[0] - 0.0).abs() < 1e-6 && (i.last().unwrap()[1] - 0.0).abs() < 1e-6
+        );
         // las etapas son los mismos puntos geométricos, en orden inverso
         let n = f.len();
         for k in 1..n - 1 {
             for axis in 0..3 {
-                assert!((f[k][axis] - i[n - 1 - k][axis]).abs() < 1e-6,
-                    "etapa {k} eje {axis}: {} vs {}", f[k][axis], i[n - 1 - k][axis]);
+                assert!(
+                    (f[k][axis] - i[n - 1 - k][axis]).abs() < 1e-6,
+                    "etapa {k} eje {axis}: {} vs {}",
+                    f[k][axis],
+                    i[n - 1 - k][axis]
+                );
             }
         }
         // el perfil vertical se voltea: el segundo punto es el despegue vertical
@@ -2323,8 +2759,14 @@ mod pruebas_sentido {
         ] {
             let (anillo, haz) = {
                 let mut materiales = mundo.resource_mut::<Assets<StandardMaterial>>();
-                let ma = materiales.add(StandardMaterial { base_color: color, ..default() });
-                let mh = materiales.add(StandardMaterial { base_color: color, ..default() });
+                let ma = materiales.add(StandardMaterial {
+                    base_color: color,
+                    ..default()
+                });
+                let mh = materiales.add(StandardMaterial {
+                    base_color: color,
+                    ..default()
+                });
                 (
                     mundo.spawn(MeshMaterial3d(ma)).id(),
                     mundo.spawn(MeshMaterial3d(mh)).id(),
@@ -2338,14 +2780,23 @@ mod pruebas_sentido {
         app.update();
         let mundo = app.world();
         assert_eq!(mundo.resource::<Vuelo>().ruta, ruta_ida);
-        assert!(mundo.entity(cinta).get::<Mesh3d>().is_some(), "cinta re-insertada");
+        assert!(
+            mundo.entity(cinta).get::<Mesh3d>().is_some(),
+            "cinta re-insertada"
+        );
         let titulo = mundo.entity(ventana).get::<Window>().unwrap().title.clone();
         assert!(titulo.contains("UTS → UIS"), "título: {titulo}");
         let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
         let [r, g, b, _] = color_de(&app, a);
-        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UTS azul");
+        assert!(
+            (r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01,
+            "anillo UTS azul"
+        );
         let [r, g, b, _] = color_de(&app, h);
-        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "haz UTS azul");
+        assert!(
+            (r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01,
+            "haz UTS azul"
+        );
 
         // Voltear: el vuelo se reconstruye desde UIS, los colores se intercambian.
         *app.world_mut().resource_mut::<Sentido>() = Sentido::UisAuts;
@@ -2356,12 +2807,21 @@ mod pruebas_sentido {
         assert!(titulo.contains("UIS → UTS"), "título: {titulo}");
         let (a, h) = mundo.resource::<Zonas>().uts.unwrap();
         let [r, g, b, _] = color_de(&app, a);
-        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "anillo UTS verde al invertir");
+        assert!(
+            (r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01,
+            "anillo UTS verde al invertir"
+        );
         let [r, g, b, _] = color_de(&app, h);
-        assert!((r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01, "haz UTS verde al invertir");
+        assert!(
+            (r - 0.5).abs() < 0.01 && (g - 0.9).abs() < 0.01 && (b - 0.6).abs() < 0.01,
+            "haz UTS verde al invertir"
+        );
         let (a, _) = mundo.resource::<Zonas>().uis.unwrap();
         let [r, g, b, _] = color_de(&app, a);
-        assert!((r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01, "anillo UIS azul al invertir");
+        assert!(
+            (r - 0.35).abs() < 0.01 && (g - 0.83).abs() < 0.01 && (b - 1.0).abs() < 0.01,
+            "anillo UIS azul al invertir"
+        );
     }
 }
 
@@ -2401,6 +2861,21 @@ mod pruebas_rotores {
         assert!(estrobo_visible(0.2));
         assert!(!estrobo_visible(0.25));
         assert!(!estrobo_visible(0.99));
+    }
+
+    #[test]
+    fn estelas_son_invisibles_en_tierra_y_ligeras_en_crucero() {
+        assert!(!estela_visible(0.0));
+        assert!(!estela_visible(1.49));
+        assert!(estela_visible(1.5));
+        assert!(estela_visible(14.0));
+        assert_eq!(estela_alfa(0.0), 0.0);
+        assert_eq!(estela_alfa(1.49), 0.0);
+        assert_eq!(estela_alfa(1.5), 0.0);
+        assert!((estela_alfa(2.0) - 0.025).abs() < 1e-6);
+        assert!(estela_alfa(3.0) > estela_alfa(2.0));
+        assert!((estela_alfa(5.5) - 0.20).abs() < 1e-6);
+        assert_eq!(estela_alfa(14.0), 0.20);
     }
 
     /// Reproducción con la escena real del GLB: antes del fix, la animación
@@ -2462,11 +2937,9 @@ mod pruebas_rotores {
             .world_mut()
             .spawn((Dron, Transform::default(), Visibility::default()))
             .id();
-        app.world_mut()
-            .entity_mut(dron)
-            .with_children(|padre| {
-                padre.spawn(SceneRoot(escena));
-            });
+        app.world_mut().entity_mut(dron).with_children(|padre| {
+            padre.spawn(SceneRoot(escena));
+        });
 
         // El spawner de escenas materializa los nodos del GLB en actualizaciones.
         let mut ids: HashMap<String, Entity> = HashMap::default();
@@ -2478,15 +2951,42 @@ mod pruebas_rotores {
                     ids.insert(nombre.as_str().to_string(), entidad.id());
                 }
             }
-            if ["DronReparto", "Rotor1", "Strobe"]
+            if ["DronReparto", "Rotor1", "Strobe", "Estela1"]
                 .iter()
                 .all(|n| ids.contains_key(*n))
             {
                 break;
             }
         }
-        for nombre in ["DronReparto", "Rotor1", "Rotor2", "Rotor3", "Rotor4", "Strobe"] {
+        for nombre in [
+            "DronReparto",
+            "Rotor1",
+            "Rotor2",
+            "Rotor3",
+            "Rotor4",
+            "Strobe",
+            "Estela1",
+            "Estela2",
+            "Estela3",
+            "Estela4",
+        ] {
             assert!(ids.contains_key(nombre), "falta el nodo {nombre} en el GLB");
+        }
+
+        // La escena se materializa después de los sistemas Update: una vuelta
+        // más permite que animar_rotores vea los nodos recién spawneados.
+        app.update();
+        for n in 1..=4 {
+            let vis = app
+                .world()
+                .entity(ids[&format!("Estela{n}")])
+                .get::<Visibility>()
+                .unwrap();
+            assert_eq!(
+                *vis,
+                Visibility::Hidden,
+                "Estela{n} debe estar oculta con los rotores parados"
+            );
         }
 
         let rot_ini: Vec<Quat> = (1..=4)
@@ -2531,13 +3031,167 @@ mod pruebas_rotores {
                 .unwrap()
                 .rotation;
             assert_ne!(rot_ini[n - 1], fin, "Rotor{n} debe girar");
+
+            let entidad_estela = ids[&format!("Estela{n}")];
+            let estela_fin = mundo
+                .entity(entidad_estela)
+                .get::<Transform>()
+                .unwrap()
+                .rotation;
+            assert_eq!(fin, estela_fin, "Estela{n} debe seguir a Rotor{n}");
+            assert_eq!(
+                *mundo.entity(entidad_estela).get::<Visibility>().unwrap(),
+                Visibility::Visible,
+                "Estela{n} visible con rotores a régimen"
+            );
         }
+        let entidad_material = mundo
+            .iter_entities()
+            .find(|entidad| {
+                entidad
+                    .get::<GltfMaterialName>()
+                    .is_some_and(|nombre| nombre.0 == "Estela")
+            })
+            .expect("entidad de malla con material Estela");
+        let manejador = entidad_material
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .expect("material estándar de la estela");
+        let material = mundo
+            .resource::<Assets<StandardMaterial>>()
+            .get(&manejador.0)
+            .unwrap();
+        let alfa = material.base_color.to_srgba().alpha;
+        assert!(alfa > 0.0 && alfa <= 0.20 + 1e-6, "alfa de estelas: {alfa}");
         let cuerpo_fin = mundo
             .entity(ids["DronReparto"])
             .get::<Transform>()
             .unwrap()
             .rotation;
-        assert_eq!(cuerpo_ini, cuerpo_fin, "el cuerpo no debe girar con los rotores");
-        assert!(estrobo_encendio && estrobo_apagado, "el estrobo debe parpadear");
+        assert_eq!(
+            cuerpo_ini, cuerpo_fin,
+            "el cuerpo no debe girar con los rotores"
+        );
+        assert!(
+            estrobo_encendio && estrobo_apagado,
+            "el estrobo debe parpadear"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pruebas_camara {
+    use super::*;
+
+    #[test]
+    fn camara_cine_es_opcional_orbita_y_hace_zoom_sin_deformarse() {
+        assert!(!Camara::default().cine, "la persecución sigue por defecto");
+        let adelante = Vec3::new(1.0, 0.0, 0.0);
+        let lateral = Vec3::new(0.0, 0.0, 1.0);
+        let encuadres: Vec<Vec3> = [0.0, 4.0, 8.0, 12.0]
+            .into_iter()
+            .map(|t| offset_cine(t, adelante, lateral))
+            .collect();
+        for (i, offset) in encuadres.iter().enumerate() {
+            assert!(offset.is_finite(), "offset no finito en muestra {i}");
+            let horizontal = Vec2::new(offset.x, offset.z).length();
+            assert!((8.0..=12.0).contains(&horizontal), "distancia {horizontal} en muestra {i}");
+            assert!((3.5..=5.0).contains(&offset.y), "altura {} en muestra {i}", offset.y);
+        }
+        assert!(encuadres[0].distance(encuadres[2]) > 0.5, "debe orbitar y hacer zoom");
+    }
+}
+
+#[cfg(test)]
+mod pruebas_toon {
+    use super::*;
+    use bevy::gltf::GltfMaterialName;
+
+    #[test]
+    fn materiales_toon_matcap_es_rgba_opaco_y_con_rango() {
+        let imagen = textura_matcap();
+        assert_eq!(imagen.texture_descriptor.size.width, 128);
+        assert_eq!(imagen.texture_descriptor.size.height, 128);
+        assert_eq!(imagen.texture_descriptor.format, TextureFormat::Rgba8UnormSrgb);
+        let datos = imagen.data.expect("pixeles del matcap");
+        assert_eq!(datos.len(), 128 * 128 * 4);
+        let mut minimo = 255u8;
+        let mut maximo = 0u8;
+        for px in datos.chunks_exact(4) {
+            assert_eq!(px[3], 255, "matcap opaco");
+            let luma = ((px[0] as u16 + px[1] as u16 + px[2] as u16) / 3) as u8;
+            minimo = minimo.min(luma);
+            maximo = maximo.max(luma);
+        }
+        assert!(maximo - minimo > 100, "matcap sin reflejos ni sombras: {minimo}..{maximo}");
+    }
+
+    #[test]
+    fn materiales_toon_conservan_pbr_y_excluyen_estela() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<ToonMaterial>>()
+            .insert_resource(MatcapDron(Handle::default()))
+            .add_systems(Update, convertir_materiales_dron);
+
+        let metal = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::srgb(0.55, 0.62, 0.72),
+                emissive: LinearRgba::rgb(0.1, 0.2, 0.3),
+                metallic: 0.85,
+                perceptual_roughness: 0.20,
+                ..default()
+            });
+        let estela = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::srgba(0.25, 0.75, 1.0, 0.0),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+        let entidad_metal = app
+            .world_mut()
+            .spawn((GltfMaterialName("Metal".into()), MeshMaterial3d(metal)))
+            .id();
+        let entidad_estela = app
+            .world_mut()
+            .spawn((GltfMaterialName("Estela".into()), MeshMaterial3d(estela)))
+            .id();
+
+        app.update();
+
+        let mundo = app.world();
+        assert!(mundo
+            .entity(entidad_metal)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .is_none());
+        let manejador = mundo
+            .entity(entidad_metal)
+            .get::<MeshMaterial3d<ToonMaterial>>()
+            .expect("Metal convertido a toon");
+        let toon = mundo
+            .resource::<Assets<ToonMaterial>>()
+            .get(&manejador.0)
+            .expect("asset toon");
+        let esperado = Color::srgb(0.55, 0.62, 0.72).to_linear();
+        assert!((toon.uniform.color.x - esperado.red).abs() < 1e-6);
+        assert!((toon.uniform.color.y - esperado.green).abs() < 1e-6);
+        assert!((toon.uniform.color.z - esperado.blue).abs() < 1e-6);
+        assert!((toon.uniform.emissive.x - 0.1).abs() < 1e-6);
+        assert!((toon.uniform.emissive.y - 0.2).abs() < 1e-6);
+        assert!((toon.uniform.emissive.z - 0.3).abs() < 1e-6);
+        assert_eq!(toon.uniform.params.x, 0.85);
+        assert_eq!(toon.uniform.params.y, 0.20);
+
+        assert!(mundo
+            .entity(entidad_estela)
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .is_some());
+        assert!(mundo
+            .entity(entidad_estela)
+            .get::<MeshMaterial3d<ToonMaterial>>()
+            .is_none());
     }
 }
