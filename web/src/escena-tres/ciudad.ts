@@ -82,14 +82,8 @@ const cajaMosaico = (caja: CajaGrados) => {
  * web/public/models/corredor-horneado.jpg. Cero peticiones de tiles en
  * vuelo: el mapa ya no depende de Esri ni ion.
  */
-const texturaHorneada = async (): Promise<THREE.Texture> => {
-  const textura = await new THREE.TextureLoader().loadAsync(
-    "/models/corredor-horneado.jpg",
-  );
-  textura.colorSpace = THREE.SRGBColorSpace;
-  textura.anisotropy = 4;
-  return textura;
-};
+const texturaHorneada = async (): Promise<THREE.Texture | null> =>
+  cargarTextura("/models/corredor-satelital.jpg");
 
 /** Rejilla del corredor con alturas reales + UV del mosaico. */
 const mallaTerreno = (corredor: RouteGroundTable): THREE.BufferGeometry => {
@@ -144,7 +138,10 @@ const mallaTerreno = (corredor: RouteGroundTable): THREE.BufferGeometry => {
       const b = a + 1;
       const c = a + ancho;
       const d = c + 1;
-      indices.push(a, c, b, b, c, d);
+      // Winding de desktop (escena.rs:1083): [a, b, c, b, d, c]. Con las
+      // normales calculadas desde el winding, este orden apunta hacia ARRIBA;
+      // el invertido cullaba las caras superiores y el terreno se veía hueco.
+      indices.push(a, b, c, b, d, c);
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -153,6 +150,98 @@ const mallaTerreno = (corredor: RouteGroundTable): THREE.BufferGeometry => {
   geo.setIndex(indices);
   geo.computeVertexNormals();
   return geo;
+};
+
+/** Caja geodésica {lon_min, lon_max, lat_min, lat_max} de un JSON de desktop. */
+interface CajaGradosJson {
+  lon_min: number;
+  lon_max: number;
+  lat_min: number;
+  lat_max: number;
+}
+
+/**
+ * Malla de relieve amplio (capas media/fondo), como `malla_relieve` de desktop:
+ * menos densa que la franja, cubre ±`lateral` m, hundida `hundido` m para no
+ * pelear por profundidad con la capa de arriba.
+ */
+const mallaRelieve = (
+  corredor: RouteGroundTable,
+  caja: CajaGradosJson,
+  lateral: number,
+  filas: number,
+  cols: number,
+  hundido: number,
+): THREE.BufferGeometry => {
+  const medio = routeFrame.distanceMeters;
+  const DIRECCION: Vec3 = [
+    routeFrame.displacement[0] / medio,
+    routeFrame.displacement[1] / medio,
+    0,
+  ];
+  const LADO: Vec3 = [-DIRECCION[1], DIRECCION[0], 0];
+
+  const posiciones: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let fila = 0; fila <= filas; fila += 1) {
+    const along = (medio * fila) / filas;
+    for (let col = 0; col <= cols; col += 1) {
+      const lat = -lateral + (2 * lateral * col) / cols;
+      const enu: Vec3 = [
+        DIRECCION[0] * along + LADO[0] * lat,
+        DIRECCION[1] * along + LADO[1] * lat,
+        0,
+      ];
+      const agl = (corredor.agl(enu) ?? CITY_GROUND_HEIGHT) - CITY_GROUND_HEIGHT;
+      posiciones.push(enu[0], agl - hundido, enu[1]);
+
+      // UV directo desde la caja geodésica del JSON (grados → 0..1).
+      // TextureLoader usa flipY=true: v=0 es el sur (abajo de la imagen),
+      // v=1 es el norte (arriba). Por eso v = (lat - lat_min) / (lat_max - lat_min).
+      const { lon, lat: latDeg } = gradosDe(enu);
+      uvs.push(
+        (lon - caja.lon_min) / (caja.lon_max - caja.lon_min),
+        (latDeg - caja.lat_min) / (caja.lat_max - caja.lat_min),
+      );
+    }
+  }
+  const ancho = cols + 1;
+  for (let fila = 0; fila < filas; fila += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const a = fila * ancho + col;
+      const b = a + 1;
+      const c = a + ancho;
+      const d = c + 1;
+      // Winding de desktop (escena.rs:1083): [a, b, c, b, d, c]. Con las
+      // normales calculadas desde el winding, este orden apunta hacia ARRIBA;
+      // el invertido cullaba las caras superiores y el terreno se veía hueco.
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(posiciones, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+};
+
+/**
+ * Carga una textura de terreno con TextureLoader (las imágenes ya están
+ * redimensionadas a ≤4096 px en disco para el límite de WebGPU).
+ */
+const cargarTextura = async (url: string): Promise<THREE.Texture | null> => {
+  try {
+    const t = await new THREE.TextureLoader().loadAsync(url);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return t;
+  } catch (error) {
+    marcarDegradado(`la textura ${url} no cargó`, error);
+    return null;
+  }
 };
 
 /** Edificios OSM extruidos (718) fusionados en una sola geometría. */
@@ -267,8 +356,8 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
     // La ortofoto es una textura de referencia, no depende de la iluminación
     // de la escena: MeshBasic evita que la ciudad desaparezca en sombra.
     textura
-      ? new THREE.MeshBasicMaterial({ map: textura })
-      : new THREE.MeshBasicMaterial({ color: 0x8fa9bf }),
+      ? new THREE.MeshStandardMaterial({ map: textura, roughness: 1, metalness: 0 })
+      : new THREE.MeshStandardMaterial({ color: 0x8fa9bf, roughness: 1, metalness: 0 }),
   );
   terreno.receiveShadow = true;
 
@@ -291,6 +380,24 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
     edificios.receiveShadow = true;
   }
   const grupo = new THREE.Group();
+
+  // Capa amplia (±9.7 km real de la caja, hundida 5 m): fondo de ciudad.
+  const cajaAmplio = (await import("./mapa-amplio-caja.json")).default as CajaGradosJson;
+  const texturaAmplio = await cargarTextura("/models/mapa-amplio.jpg");
+  if (texturaAmplio) {
+    const mallaAmplio = mallaRelieve(corredor, cajaAmplio, 9712, 30, 30, 5);
+    grupo.add(new THREE.Mesh(mallaAmplio, new THREE.MeshStandardMaterial({ map: texturaAmplio, roughness: 1, metalness: 0 })));
+  }
+
+  // Capa media (±4.9 km real de la caja, hundida 3 m para evitar z-fighting).
+  const cajaMedio = (await import("./mapa-medio-caja.json")).default as CajaGradosJson;
+  const texturaMedio = await cargarTextura("/models/mapa-medio.jpg");
+  if (texturaMedio) {
+    const mallaMedio = mallaRelieve(corredor, cajaMedio, 4906, 40, 40, 3);
+    grupo.add(new THREE.Mesh(mallaMedio, new THREE.MeshStandardMaterial({ map: texturaMedio, roughness: 1, metalness: 0 })));
+  }
+
+  // Capa franja (alta resolución, arriba del todo): tapa a las de abajo.
   grupo.add(terreno);
   if (edificios) grupo.add(edificios);
   return { grupo, cuentaEdificios: cuenta };
