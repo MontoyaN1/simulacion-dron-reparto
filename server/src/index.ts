@@ -115,7 +115,11 @@ app.get("/api/frame", async () => ({
 
 app.get("/api/sim", async () => runtime.session());
 
-app.get("/api/route", async () => ({ route, planning: plan.stats, buildings: buildings.count }));
+app.get("/api/route", async () => ({
+  route: runtime.rutaActual(),
+  planning: plan.stats,
+  buildings: buildings.count,
+}));
 
 app.get("/api/buildings", async (_request, reply) => {
   if (!buildings.geojson) {
@@ -132,7 +136,7 @@ app.post("/api/sim/action", async (request, reply) => {
   const action = body?.action;
   let command: ClientCommand | null = null;
 
-  if (action === "start" || action === "pause" || action === "resume" || action === "reset") {
+  if (action === "start" || action === "pause" || action === "resume" || action === "reset" || action === "sentido") {
     command = { type: action };
   } else if (action === "speed" && typeof body?.value === "number") {
     command = { type: "speed", value: body.value };

@@ -15,14 +15,26 @@ interface Props {
   status: SimulationStatus;
   connected: boolean;
   send: (command: ClientCommand) => void;
+  /** Sentido vigente (UTS→UIS = false). El botón alterna y App refresca. */
+  sentido?: boolean;
+  onSentido?: () => void;
 }
 
-const SPEEDS = [1, 2, 4] as const;
+const SPEEDS = [1, 2, 4, 8, 16] as const;
 
-export function SimulationStage({ buffer, route, telemetry, status, connected, send }: Props) {
+export function SimulationStage({
+  buffer,
+  route,
+  telemetry,
+  status,
+  connected,
+  send,
+  sentido = false,
+  onSentido,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<EscenaTres | null>(null);
-  const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
+  const [cameraMode, setCameraMode] = useState<CameraMode>("seguir");
   const [missionState, setMissionState] = useState<MissionState>("esperando");
   const [fps, setFps] = useState<number | null>(null);
 
@@ -66,6 +78,24 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     sceneRef.current?.setCameraMode(cameraMode);
   }, [cameraMode]);
 
+  // Escena → HUD: el arrastre del ratón cambia el modo dentro de la escena
+  // (órbita libre) y los botones deben reflejarlo.
+  useEffect(() => {
+    sceneRef.current?.attachCameraMode(setCameraMode);
+  }, []);
+
+  // Atajos de desktop: R vuelve a seguir al dron, C alterna la cámara cine.
+  useEffect(() => {
+    const teclas = (evento: KeyboardEvent) => {
+      if (evento.key === "r" || evento.key === "R") setCameraMode("seguir");
+      if (evento.key === "c" || evento.key === "C") {
+        setCameraMode((modo) => (modo === "cine" ? "seguir" : "cine"));
+      }
+    };
+    window.addEventListener("keydown", teclas);
+    return () => window.removeEventListener("keydown", teclas);
+  }, []);
+
   const running = status.running;
   const primaryLabel = status.delivered
       ? "Entregado"
@@ -87,32 +117,28 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     <section className="stage" aria-label="Escena 3D de la simulación">
       <div className="stage-host" ref={hostRef} />
 
-      <div className="mission-chip" role="status">
-        <span className={`mission-dot mission-${missionState}`} />
-        <span className="mission-label">{MISSION_STATE_LABEL[missionState]}</span>
-      </div>
-
-      <div className="fps-panel" role="status">
-        <span className="fps-motor">three</span>
-        <span className="fps-valor mono">{fps === null ? "—" : `${fps} fps`}</span>
-      </div>
-
       <div className="stage-top">
         <div className="stage-heading">
           <p className="eyebrow">UTS → UIS · Bucaramanga</p>
           <h1>Simulación en vivo</h1>
         </div>
-        <div className="segmented" role="group" aria-label="Modo de cámara">
-          {CAMERA_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              className={cameraMode === mode.id ? "segmented-item is-active" : "segmented-item"}
-              onClick={() => setCameraMode(mode.id)}
-            >
-              {mode.label}
-            </button>
-          ))}
+        <div className="camara-fps">
+          <div className="segmented" role="group" aria-label="Modo de cámara">
+            {CAMERA_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                className={cameraMode === mode.id ? "segmented-item is-active" : "segmented-item"}
+                onClick={() => setCameraMode(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+          <div className="fps-panel" role="status">
+            <span className="fps-motor">three</span>
+            <span className="fps-valor mono">{fps === null ? "—" : `${fps} fps`}</span>
+          </div>
         </div>
       </div>
 
@@ -160,6 +186,11 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
           <button type="button" className="button" onClick={() => send({ type: "reset" })}>
             Reiniciar
           </button>
+          {onSentido && (
+            <button type="button" className="button" onClick={onSentido}>
+              Sentido: {sentido ? "UIS → UTS" : "UTS → UIS"}
+            </button>
+          )}
           <div className="segmented" role="group" aria-label="Velocidad de simulación">
             {SPEEDS.map((speed) => (
               <button

@@ -19,16 +19,9 @@ import type { RouteGroundTable } from "./route-ground";
 import type { MissionState } from "../mision/tipos";
 import { construirCiudad, enuATres } from "./ciudad";
 import { MisionTres } from "./mision";
-import { RigCamara, crearEtiqueta, crearHalo, type Fase } from "./camara";
+import { crearEtiqueta, crearHalo } from "./camara";
 
 /** Fase de telemetría → fase de encuadre de cámara. */
-const FASE_DE: Record<Telemetry["phase"], Fase> = {
-  idle: "despegue",
-  takeoff: "despegue",
-  cruise: "crucero",
-  descent: "descenso",
-  delivered: "entregado",
-};
 
 const FOV = 52;
 const TRAIL_MIN = 2.5;
@@ -76,16 +69,23 @@ export class EscenaTres {
 
   private buffer: EscenaBuffer | null = null;
   private onEstado: ((estado: MissionState) => void) | null = null;
-  /** Rig de cámara: encuadre por fase y modos chase/orbit/top/free. */
-  private readonly rig: RigCamara;
+  private onCamara: ((modo: CameraMode) => void) | null = null;
+  /** Cámara estilo desktop (escena.rs:499): seguir, cine y órbita libre. */
+  private camaraModo: CameraMode = "seguir";
+  private azim = 0;
+  private elev = 0.6;
+  private dist = 75;
+  /** Ejes fijos del corredor: los candidatos de persecución no rotan con el
+   * rumbo instantáneo (esa rotación era el tambaleo heredado del legacy). */
+  private readonly dirCorredor: THREE.Vector3;
+  private readonly ladoCorredor: THREE.Vector3;
+  private objetivoCamara = new THREE.Vector3();
   private destruida = false;
   private rafId = 0;
   private lastFrame = performance.now();
   private rumboActual = 0;
   private pitchFuselage = 0;
   private rollFuselage = 0;
-  /** Última fase vista en telemetría: solo reencuadra cuando cambia de verdad. */
-  private faseTelemetria: Fase | null = null;
   private camaraBloqueada = true;
   private liberarCamaraEn = performance.now() + 2400;
   private ultimoT = 0;
@@ -111,6 +111,15 @@ export class EscenaTres {
     this.renderer.setSize(Math.max(2, container.clientWidth), Math.max(2, container.clientHeight));
     container.appendChild(this.renderer.domElement);
 
+    // Ejes fijos del corredor (desktop: corredor.dir/lado), en coords three
+    // (x=este, y=arriba, z=norte).
+    const largoRuta = Math.hypot(routeFrame.displacement[0], routeFrame.displacement[1]) || 1;
+    this.dirCorredor = new THREE.Vector3(
+      routeFrame.displacement[0] / largoRuta,
+      0,
+      routeFrame.displacement[1] / largoRuta,
+    );
+    this.ladoCorredor = new THREE.Vector3(-this.dirCorredor.z, 0, this.dirCorredor.x);
     this.camara = new THREE.PerspectiveCamera(
       FOV,
       Math.max(0.1, container.clientWidth / Math.max(1, container.clientHeight)),
@@ -120,24 +129,36 @@ export class EscenaTres {
     );
     this.camara.position.set(0, 220, -420);
     this.camara.lookAt(0, 0, 0);
-    this.rig = new RigCamara(this.camara.aspect, this.camara);
-    this.rig.segura = (objetivo, deseada) => this.posicionSegura(objetivo, deseada);
 
-    // Zoom con rueda dentro del visor: preventDefault + passive:false para que
-    // la página no haga scroll (era el choque reportado). Limitado 3\u201360 m.
     const canvas = this.renderer.domElement;
+    // Zoom de desktop (entrada_camara): multiplica la distancia de órbita y
+    // pasa la cámara a libre adoptando el encuadre actual.
     canvas.addEventListener("wheel", (evento) => {
       if (evento.ctrlKey) return; // el zoom de accesibilidad del navegador queda
       evento.preventDefault();
       // Firefox reporta líneas (deltaMode 1), no píxeles: normalizar.
-      const dy =
-        evento.deltaMode === 1
-          ? evento.deltaY * 16
-          : evento.deltaMode === 2
-            ? evento.deltaY * window.innerHeight
-            : evento.deltaY;
-      this.rig.dist = Math.max(3, Math.min(60, this.rig.dist * Math.exp(dy * 0.001)));
+      const dy = Math.max(-2, Math.min(2, evento.deltaY / 100));
+      this.dist = Math.min(900, Math.max(12, this.dist * (1 + dy * 0.08)));
+      this.volverLibre();
     }, { passive: false });
+    // Arrastre izquierdo = órbita libre, con adopción de encuadre al soltar
+    // el modo de seguimiento (entrada_camara de desktop, escena.rs:533).
+    let arrastrando = false;
+    canvas.addEventListener("pointerdown", (evento) => {
+      if (evento.button === 0) arrastrando = true;
+    });
+    canvas.addEventListener("pointermove", (evento) => {
+      if (!arrastrando) return;
+      this.azim -= evento.movementX * 0.005;
+      this.elev = Math.min(1.45, Math.max(0.06, this.elev + evento.movementY * 0.005));
+      this.volverLibre();
+    });
+    window.addEventListener("pointerup", () => {
+      arrastrando = false;
+    });
+    window.addEventListener("blur", () => {
+      arrastrando = false;
+    });
     this.mundo.background = new THREE.Color("#8fb4d8");
     // Bruma: desktop deja ver toda la ciudad (±8 km); con 4600 la capa
     // amplia desaparecía por completo tras el horizonte.
@@ -435,12 +456,34 @@ export class EscenaTres {
   }
 
   setCameraMode(modo: CameraMode): void {
-    this.rig.setModo(modo);
+    if (modo === this.camaraModo) return;
+    if (modo === "libre") {
+      this.volverLibre();
+      return;
+    }
+    this.camaraModo = modo;
+    this.camaraBloqueada = false;
+    this.onCamara?.(modo);
   }
 
-  /** Fuerza el encuadre de una fase (si no, se deriva de la telemetría). */
-  setFase(fase: Fase): void {
-    this.rig.setFase(fase);
+  /** Arrastrar o usar la rueda adopta el encuadre actual como órbita libre
+   * (desktop: entrada_camara adopta dist/elev/azim de la posición presente). */
+  private volverLibre(): void {
+    if (this.camaraModo !== "libre") {
+      const rel = this.camara.position.clone().sub(this.objetivoCamara);
+      const h = Math.max(1e-3, rel.length());
+      this.dist = Math.min(900, Math.max(12, h));
+      this.elev = Math.min(1.45, Math.max(0.06, Math.asin(rel.y / h)));
+      this.azim = Math.atan2(rel.z, rel.x);
+      this.camaraModo = "libre";
+      this.onCamara?.("libre");
+    }
+    this.camaraBloqueada = false;
+  }
+
+  /** El HUD se entera cuando la escena cambia de modo sola (R/C/arrastre). */
+  attachCameraMode(callback: (modo: CameraMode) => void): void {
+    this.onCamara = callback;
   }
 
   /** Posición visual del dron (z already clamped al terreno real). */
@@ -495,45 +538,134 @@ export class EscenaTres {
     }
   }
 
+  /** Sigue al dron como desktop (seguir_dron, escena.rs:2186): candidatos
+   * FIJOS sobre los ejes del corredor, línea de visión con histéresis y
+   * suavizado exponencial — sin offsets que roten con el rumbo (el tambaleo
+   * heredado del legacy venía de eso). */
   private camaraActualiza(sample: Telemetry, dt: number): void {
     const display = this.displayDron(sample);
     const agl = this.alturaSuelo(display);
-    const objetivo = new THREE.Vector3(display[0], agl + display[2], display[1]);
+    const pos = new THREE.Vector3(display[0], agl + display[2], display[1]);
+    this.objetivoCamara.copy(pos);
     if (this.camaraBloqueada) {
       // Plano de establecimiento: la cámara está lejos, pero sigue apuntando
       // al dron para que nunca salga de cuadro mientras dura el plano.
-      this.rig.mirar(objetivo);
+      this.camara.lookAt(pos);
       if (performance.now() < this.liberarCamaraEn) return;
       this.camaraBloqueada = false;
     }
-    // La fase de la telemetría elige el encuadre (despegue/crucero/descenso/
-    // entregado); el rig siempre hace lookAt al dron. setFase() manda hasta
-    // que el vuelo cambie realmente de fase.
-    const fase = FASE_DE[sample.phase];
-    if (fase !== this.faseTelemetria) {
-      this.faseTelemetria = fase;
-      this.rig.setFase(fase);
+
+    const desde = pos.clone().add(new THREE.Vector3(0, 1.2, 0));
+    let elegido: THREE.Vector3;
+    if (this.camaraModo === "cine") {
+      // offset_cine: órbita lenta three-quarter alrededor del dron.
+      const t = performance.now() / 1000;
+      const angulo = 0.55 + 0.22 * Math.sin(t * 0.18);
+      const distancia = 10 + 2 * Math.sin(t * 0.11);
+      const altura = 4.25 + 0.75 * Math.sin(t * 0.23 + 1);
+      const candidato = pos
+        .clone()
+        .add(
+          this.dirCorredor
+            .clone()
+            .multiplyScalar(Math.cos(angulo) * distancia)
+            .add(this.ladoCorredor.clone().multiplyScalar(Math.sin(angulo) * distancia))
+            .add(new THREE.Vector3(0, altura, 0)),
+        );
+      elegido = this.recortarVision(desde, candidato, 1.2, 1.5);
+      const suavizado = 1 - Math.exp(-4 * dt);
+      this.camara.position.lerp(elegido, suavizado);
+      this.camara.position.y = Math.max(this.camara.position.y, this.alturaSuelo([this.camara.position.x, this.camara.position.z, 0]) + 2);
+      this.camara.lookAt(pos.x, pos.y + 1, pos.z);
+      return;
     }
-    this.rig.actualizar(objetivo, this.rumboActual, dt, display[2]);
+    if (this.camaraModo === "libre") {
+      // Órbita libre alrededor del dron, con el mismo recorte de colisión.
+      const offset = new THREE.Vector3(
+        Math.sin(this.azim) * Math.cos(this.elev),
+        Math.sin(this.elev),
+        Math.cos(this.azim) * Math.cos(this.elev),
+      ).multiplyScalar(this.dist);
+      const candidato = pos.clone().add(offset);
+      elegido = this.recortarVision(desde, candidato, 2, 1.5);
+      const suavizado = 1 - Math.exp(-10 * dt);
+      this.camara.position.lerp(elegido, suavizado);
+      this.camara.position.y = Math.max(this.camara.position.y, this.alturaSuelo([this.camara.position.x, this.camara.position.z, 0]) + 4);
+      this.camara.lookAt(pos.x, pos.y + 1.5, pos.z);
+      return;
+    }
+
+    // Persecución: candidatos de más aérea a más pegada; se usa el primero
+    // con línea de visión libre (si no, el que deje al menos 40 % de hueco).
+    const atras = this.dirCorredor.clone().multiplyScalar(-1);
+    const lateral = this.ladoCorredor;
+    const candidatos = [
+      pos.clone().add(atras.clone().multiplyScalar(45)).add(new THREE.Vector3(0, 62, 0)),
+      pos.clone().add(atras.clone().multiplyScalar(60)).add(new THREE.Vector3(0, 45, 0)),
+      pos.clone().add(lateral.clone().multiplyScalar(50)).add(new THREE.Vector3(0, 40, 0)),
+      pos.clone().add(atras.clone().multiplyScalar(30)).add(new THREE.Vector3(0, 78, 0)),
+      pos.clone().add(new THREE.Vector3(0, 95, 0)),
+    ];
+    elegido = candidatos[0];
+    for (const candidato of candidatos) {
+      const distancia = candidato.clone().sub(desde).length();
+      const toi = this.toiVision(desde, candidato);
+      if (toi === null) {
+        elegido = candidato;
+        break;
+      }
+      // Solo se acepta si la pared queda lejos: si no, la cámara acabaría
+      // pegada a una fachada y no se ve nada.
+      if (toi >= 0.6 * distancia) {
+        elegido = desde.clone().add(
+          candidato.clone().sub(desde).normalize().multiplyScalar(Math.max(toi - 2, 1.5)),
+        );
+        break;
+      }
+    }
+    const suavizado = 1 - Math.exp(-6 * dt);
+    this.camara.position.lerp(elegido, suavizado);
+    // Nunca por debajo del suelo: +6 m como desktop.
+    this.camara.position.y = Math.max(
+      this.camara.position.y,
+      this.alturaSuelo([this.camara.position.x, this.camara.position.z, 0]) + 6,
+    );
+    this.camara.lookAt(pos.x, pos.y + 1.5, pos.z);
   }
 
-  /** Evita que la cámara atraviese edificios o baje bajo el terreno. */
-  private posicionSegura(objetivo: THREE.Vector3, deseada: THREE.Vector3): THREE.Vector3 {
-    const vector = deseada.clone().sub(objetivo);
-    const distancia = vector.length();
-    if (distancia < 0.001) return deseada;
-    vector.normalize();
-    this.colision.set(objetivo, vector);
+  /** Distancia al primer edificio que corta la línea desde→objetivo
+   * (desktop: golpe_de). Null si la línea está limpia. */
+  private toiVision(desde: THREE.Vector3, objetivo: THREE.Vector3): number | null {
+    const delta = objetivo.clone().sub(desde);
+    const distancia = delta.length();
+    if (distancia < 1e-3) return null;
+    this.colision.set(desde, delta.normalize());
     this.colision.far = distancia;
     const impactos = this.ciudad
       ? this.colision.intersectObject(this.ciudad, true)
       : [];
-    if (impactos.length > 0 && impactos[0].distance < distancia) {
-      return impactos[0].point.clone().addScaledVector(vector, -2.5);
-    }
-    return deseada;
+    return impactos.length > 0 ? impactos[0].distance : null;
   }
 
+  /** Coloca la cámara a `margen` del primer golpe (desktop: toi − margen). */
+  private recortarVision(
+    desde: THREE.Vector3,
+    candidato: THREE.Vector3,
+    margen: number,
+    minimo: number,
+  ): THREE.Vector3 {
+    const toi = this.toiVision(desde, candidato);
+    if (toi === null) return candidato;
+    return desde.clone().add(
+      candidato
+        .clone()
+        .sub(desde)
+        .normalize()
+        .multiplyScalar(Math.max(toi - margen, minimo)),
+    );
+  }
+
+  /** Evita que la cámara atraviese edificios o baje bajo el terreno. */
   /** Bucle principal: minestro telemetría, misión, toma cinematográfica, render. */
   private readonly bucle = (): void => {
     if (this.destruida) return;

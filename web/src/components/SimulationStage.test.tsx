@@ -25,6 +25,7 @@ vi.mock("../escena-tres/escena", () => ({
     attachMissionState(): void {}
     setRoute(): void {}
     setCameraMode(): void {}
+    attachCameraMode(): void {}
     destroy(): void {}
   },
 }));

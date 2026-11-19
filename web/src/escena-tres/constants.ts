@@ -10,11 +10,12 @@ export const DRONE_MODEL_SCALE = 1.15;
 export const GEAR_CLEARANCE = 0.323 * DRONE_MODEL_SCALE + 0.25;
 export const CITY_GROUND_HEIGHT = 938.5;
 
+// Los 3 modos de desktop (escena.rs:499): persecución por defecto, cine
+// opcional y órbita libre que se activa sola al arrastrar o usar la rueda.
 export const CAMERA_MODES = [
-  { id: "chase", label: "Persecución" },
-  { id: "orbit", label: "Órbita" },
-  { id: "top", label: "Cenital" },
-  { id: "free", label: "Libre" },
+  { id: "seguir", label: "Seguir" },
+  { id: "cine", label: "Cine" },
+  { id: "libre", label: "Libre" },
 ] as const;
 
 export type CameraMode = (typeof CAMERA_MODES)[number]["id"];

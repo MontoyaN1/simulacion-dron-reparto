@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { DetailsSection } from "./components/DetailsSection";
 import { EventsPanel } from "./components/EventsPanel";
 import { SimulationStage } from "./components/SimulationStage";
@@ -6,6 +7,7 @@ import { useSimulation } from "./sim/useSimulation";
 
 export function App() {
   const { buffer, telemetry, status, events, route, connected, send } = useSimulation();
+  const [sentido, setSentido] = useState(false);
 
   return (
     <div className="app">
@@ -43,6 +45,11 @@ export function App() {
             status={status}
             connected={connected}
             send={send}
+            sentido={sentido}
+            onSentido={() => {
+              setSentido((valor) => !valor);
+              send({ type: "sentido" });
+            }}
           />
           <aside className="sidebar">
             <TelemetryPanel telemetry={telemetry} status={status} />
@@ -50,7 +57,7 @@ export function App() {
           </aside>
         </div>
 
-        <DetailsSection telemetry={telemetry} />
+        <DetailsSection telemetry={telemetry} sentido={sentido} />
       </main>
 
       <footer className="footer">

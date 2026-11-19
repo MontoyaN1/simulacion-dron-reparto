@@ -235,9 +235,21 @@ function buildTopics(live: LiveAlgebra | null): Topic[] {
   ];
 }
 
-export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
+export function DetailsSection({
+  telemetry,
+  sentido = false,
+}: {
+  telemetry: Telemetry | null;
+  sentido?: boolean;
+}) {
   const [frame, setFrame] = useState<FramePayload | null>(null);
   const [planning, setPlanning] = useState<PlanningSummary | null>(null);
+  // Con sentido UIS→UTS la llegada vuelve a ser la UTS (origen del marco):
+  // rumbo +180° y destino académico (0, 0, 0), igual que desktop.
+  const rumboReal = (frame?.bearingDeg ?? routeFrame.bearingDeg) + (sentido ? 180 : 0);
+  const destinoReal: Triple = sentido
+    ? [0, 0, 0]
+    : (frame?.destinationAcademic ?? routeFrame.destinationAcademic);
 
   useEffect(() => {
     let active = true;
@@ -333,7 +345,7 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
             <div>
               <dt>Destino académico</dt>
               <dd className="mono">
-                {frame ? fmtVector(frame.destinationAcademic, 3) : "—"}
+                {frame ? fmtVector(destinoReal, 3) : "—"}
               </dd>
             </div>
             <div>
@@ -414,8 +426,8 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
       </section>
       <div className="modelo-doc-section">
         <ModeloDocumentoCard
-          rumboReal={frame?.bearingDeg ?? routeFrame.bearingDeg}
-          destinoReal={frame?.destinationAcademic ?? routeFrame.destinationAcademic}
+          rumboReal={rumboReal}
+          destinoReal={destinoReal}
         />
       </div>
       <div className="data-section">

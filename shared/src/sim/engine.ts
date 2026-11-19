@@ -19,6 +19,8 @@ export class DroneSimulation {
   private readonly cumulative: readonly number[];
   private readonly totalLength: number;
 
+  // Nace en el primer punto de la ruta (desktop: MotorVuelo::nuevo): con el
+  // sentido invertido la ruta arranca en la UIS, no en el origen del marco.
   private position: Vec3 = [0, 0, 0];
   private velocity: Vec3 = [0, 0, 0];
   private acceleration: Vec3 = [0, 0, 0];
@@ -53,6 +55,7 @@ export class DroneSimulation {
     const metrics = routeMetrics(this.options.route);
     this.cumulative = metrics.cumulative;
     this.totalLength = metrics.totalLength;
+    this.position = [...this.options.route[0]] as Vec3;
   }
 
   get optionsSnapshot(): SimulationOptions {
@@ -75,7 +78,7 @@ export class DroneSimulation {
   }
 
   reset(): void {
-    this.position = [0, 0, 0];
+    this.position = [...this.options.route[0]] as Vec3;
     this.velocity = [0, 0, 0];
     this.acceleration = [0, 0, 0];
     this.elapsed = 0;

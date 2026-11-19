@@ -21,7 +21,7 @@ const clamp = (value: number, minimum: number, maximum: number): number =>
 
 export class SimulationRuntime {
   private sim: DroneSimulation;
-  private readonly route: Vec3[];
+  private route: Vec3[];
   private readonly listeners = new Set<Listener>();
   private readonly timer: NodeJS.Timeout;
   private eventLog: SimEvent[] = [];
@@ -87,6 +87,9 @@ export class SimulationRuntime {
       case "speed":
         this.setSpeed(command.value);
         break;
+      case "sentido":
+        this.invertir();
+        break;
     }
   }
 
@@ -131,8 +134,23 @@ export class SimulationRuntime {
 
   setSpeed(value: number): void {
     if (!Number.isFinite(value)) return;
-    this.speed = clamp(value, 0.25, 8);
+    this.speed = clamp(value, 0.25, 16);
     this.emitStatus();
+  }
+
+  /** Ruta vigente (cambia con el sentido). */
+  rutaActual(): Vec3[] {
+    return this.route;
+  }
+
+  /** Sentido UTS↔UIS (desktop: aplicar_sentido): invierte la MISMA polilínea
+   * sin re-planificar y reconstruye el vuelo; conserva la velocidad elegida. */
+  invertir(): void {
+    this.route = this.route.slice().reverse();
+    const velocidad = this.speed;
+    this.reset();
+    this.speed = velocidad;
+    this.emit({ type: "route", payload: { route: this.route } });
   }
 
   private tick(): void {

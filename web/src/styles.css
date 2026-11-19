@@ -1111,6 +1111,18 @@ main {
   }
 }
 
+/* FPS junto a los controles de cámara (paridad con la barra de desktop). */
+.camara-fps {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.camara-fps .fps-panel {
+  position: static;
+  transform: none;
+}
+
 .fps-panel {
   position: absolute;
   height: 26px;
