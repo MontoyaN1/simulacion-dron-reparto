@@ -36,6 +36,42 @@ export interface EscenaTresOpciones {
   readonly corredor: RouteGroundTable;
 }
 
+let geoRopaPersona: THREE.BufferGeometry | null = null;
+let geoPielPersona: THREE.BufferGeometry | null = null;
+
+/** Geometrías compartidas de la persona low-poly: ropa (torso, brazos y
+ * piernas) y piel (cabeza). Se crean una sola vez y se reutilizan en cada
+ * reconstrucción de la ruta; destroy() no las descarta (userData.compartida). */
+const geometriasPersona = (): {
+  ropa: THREE.BufferGeometry;
+  piel: THREE.BufferGeometry;
+} => {
+  if (geoRopaPersona && geoPielPersona) {
+    return { ropa: geoRopaPersona, piel: geoPielPersona };
+  }
+  const torso = new THREE.CylinderGeometry(0.17, 0.21, 0.62, 7);
+  torso.translate(0, 1.02, 0);
+  const brazoIzq = new THREE.CylinderGeometry(0.05, 0.05, 0.5, 5);
+  brazoIzq.translate(0.24, 1.02, 0);
+  const brazoDer = new THREE.CylinderGeometry(0.05, 0.05, 0.5, 5);
+  brazoDer.translate(-0.24, 1.02, 0);
+  const piernas = new THREE.CylinderGeometry(0.15, 0.12, 0.78, 5);
+  piernas.translate(0, 0.39, 0);
+  const ropa = mergeGeometries([torso, brazoIzq, brazoDer, piernas]);
+  const piel = new THREE.SphereGeometry(0.135, 10, 8);
+  piel.translate(0, 1.52, 0);
+  if (!ropa) {
+    // Fallback improbable: sin fusión, la ropa es un solo cilindro.
+    geoRopaPersona = torso;
+  } else {
+    geoRopaPersona = ropa;
+  }
+  geoRopaPersona.userData.compartida = true;
+  piel.userData.compartida = true;
+  geoPielPersona = piel;
+  return { ropa: geoRopaPersona, piel: geoPielPersona };
+};
+
 /** Escena three.js del corredor: único motor de render. */
 export class EscenaTres {
   private readonly renderer: WebGPURenderer;
@@ -84,8 +120,14 @@ export class EscenaTres {
   /** Altura del terreno bajo la cámara/drón filtrada en baja frecuencia: el
    * DEM por celdas escalona y esa escalera era el tambaleo residual. */
   private aglCamara: number | null = null;
-  /** Personas low-poly en las plazoletas (una InstancedMesh = un draw call). */
-  private personas: THREE.InstancedMesh | null = null;
+  /** Personas low-poly en las plazoletas: dos InstancedMesh (ropa + piel)
+   * que comparten matrices; geometrías cacheadas entre rebuilds. */
+  private personas: THREE.InstancedMesh[] = [];
+  /** Posición del dron filtrada: el jitter de red del buffer a 15 Hz se
+   * percibe como temblor y este filtro (≈70 ms) lo elimina. */
+  private displaySuave: Vec3 | null = null;
+  private displayCache: Vec3 | null = null;
+  private displayFrame = -1;
   private readonly ultimaPosDron = new THREE.Vector3();
   /** Transición animada de cámara al Reiniciar o cambiar el sentido. */
   private transicion: {
@@ -482,27 +524,23 @@ export class EscenaTres {
     this.aglCamara = null;
   }
 
-  /** Personas low-poly en las plazoletas de la UTS y la UIS: una sola
-   * InstancedMesh (un draw call) con colores por instancia. */
+  /** Personas low-poly en las plazoletas de la UTS y la UIS: dos
+   * InstancedMesh (ropa y piel) que comparten matrices — 2 draw calls en
+   * total, con color de ropa y de piel por persona. Las geometrías se crean
+   * una sola vez y se reutilizan en cada reconstrucción de la ruta. */
   private colocarPersonas(inicio: THREE.Vector3, fin: THREE.Vector3): void {
     const POR_PLAZA = 12;
-    if (this.personas) {
-      this.mundo.remove(this.personas);
-      this.personas.dispose();
-      this.personas = null;
+    for (const malla of this.personas) {
+      this.mundo.remove(malla);
+      (malla.material as THREE.Material).dispose();
+      malla.dispose();
     }
-    const cuerpo = new THREE.CylinderGeometry(0.16, 0.22, 1.05, 6);
-    cuerpo.translate(0, 0.6, 0);
-    const cabeza = new THREE.SphereGeometry(0.13, 8, 6);
-    cabeza.translate(0, 1.28, 0);
-    const geo = mergeGeometries([cuerpo, cabeza]);
-    if (!geo) return;
-    const personas = new THREE.InstancedMesh(
-      geo,
-      new THREE.MeshLambertMaterial(),
-      POR_PLAZA * 2,
-    );
+    this.personas = [];
+    const { ropa: geoRopa, piel: geoPiel } = geometriasPersona();
+    const ropa = new THREE.InstancedMesh(geoRopa, new THREE.MeshLambertMaterial(), POR_PLAZA * 2);
+    const piel = new THREE.InstancedMesh(geoPiel, new THREE.MeshLambertMaterial(), POR_PLAZA * 2);
     const ROPA = [0x4a5568, 0x718096, 0x8b6f47, 0x5d6b7a, 0x975a4e, 0x6b705c];
+    const PIEL = [0xf5d7bd, 0xe9bd93, 0xd6a077, 0xb9835a, 0x8f6242, 0x6e4a30];
     const matriz = new THREE.Matrix4();
     const color = new THREE.Color();
     let semilla = 7;
@@ -520,17 +558,22 @@ export class EscenaTres {
         // De pie sobre la plazoleta, mirando hacia el punto de entrega.
         matriz.makeRotationY(Math.atan2(base.x - x, base.z - z));
         matriz.setPosition(x, base.y, z);
-        personas.setMatrixAt(i, matriz);
-        color.setHex(ROPA[i % ROPA.length]);
-        personas.setColorAt(i, color);
+        ropa.setMatrixAt(i, matriz);
+        piel.setMatrixAt(i, matriz);
+        color.setHex(ROPA[Math.floor(azar() * ROPA.length)]);
+        ropa.setColorAt(i, color);
+        color.setHex(PIEL[Math.floor(azar() * PIEL.length)]);
+        piel.setColorAt(i, color);
         i += 1;
       }
     }
-    personas.instanceMatrix.needsUpdate = true;
-    if (personas.instanceColor) personas.instanceColor.needsUpdate = true;
-    personas.castShadow = true;
-    this.mundo.add(personas);
-    this.personas = personas;
+    for (const malla of [ropa, piel]) {
+      malla.instanceMatrix.needsUpdate = true;
+      if (malla.instanceColor) malla.instanceColor.needsUpdate = true;
+      malla.castShadow = true;
+      this.mundo.add(malla);
+      this.personas.push(malla);
+    }
   }
 
   setCameraMode(modo: CameraMode): void {
@@ -565,17 +608,49 @@ export class EscenaTres {
   }
 
   /** Posición visual del dron (z already clamped al terreno real). */
-  private displayDron(sample: Telemetry): Vec3 {
-    return [
+  /** Posición del dron filtrada en baja frecuencia: el buffer interpola a
+   * 15 Hz y el jitter de red se percibe como temblor (≈70 ms, sin retraso
+   * visible). Un salto grande (Reiniciar/Sentido) se adopta de inmediato. */
+  private displayDron(sample: Telemetry, dt: number): Vec3 {
+    // El filtro avanza una sola vez por frame (tres sistemas lo consultan).
+    if (this.displayFrame === this.framesVistos && this.displayCache) {
+      return [...this.displayCache] as Vec3;
+    }
+    this.displayFrame = this.framesVistos;
+    const objetivo: Vec3 = [
       sample.position[0],
       sample.position[1],
       sample.position[2] + GEAR_CLEARANCE,
     ];
+    if (!this.displaySuave) {
+      this.displaySuave = [...objetivo] as Vec3;
+      this.displayCache = [...this.displaySuave] as Vec3;
+      return [...this.displayCache] as Vec3;
+    }
+    const salto = Math.hypot(
+      objetivo[0] - this.displaySuave[0],
+      objetivo[1] - this.displaySuave[1],
+      objetivo[2] - this.displaySuave[2],
+    );
+    if (salto > 100) {
+      this.displaySuave = [...objetivo] as Vec3;
+      this.displayCache = [...this.displaySuave] as Vec3;
+      return [...this.displayCache] as Vec3;
+    }
+    const mezcla = 1 - Math.exp(-14 * dt);
+    const suave: Vec3 = [
+      this.displaySuave[0] + (objetivo[0] - this.displaySuave[0]) * mezcla,
+      this.displaySuave[1] + (objetivo[1] - this.displaySuave[1]) * mezcla,
+      this.displaySuave[2] + (objetivo[2] - this.displaySuave[2]) * mezcla,
+    ];
+    this.displaySuave = suave;
+    this.displayCache = [...suave] as Vec3;
+    return [...this.displayCache] as Vec3;
   }
 
   /** Rotores girando, inclinación según la aceleración y rastro del vuelo. */
   private actualizarDron(sample: Telemetry, dt: number): void {
-    const display = this.displayDron(sample);
+    const display = this.displayDron(sample, dt);
     const agl = this.alturaSuelo(display);
     const posicion = enuATres(display, agl);
     this.dron.position.copy(posicion);
@@ -621,7 +696,7 @@ export class EscenaTres {
    * suavizado exponencial — sin offsets que roten con el rumbo (el tambaleo
    * heredado del legacy venía de eso). */
   private camaraActualiza(sample: Telemetry, dt: number): void {
-    const display = this.displayDron(sample);
+    const display = this.displayDron(sample, dt);
     // El DEM por celdas salta al cruzar una celda (48×75 m): filtrado en baja
     // frecuencia desaparece el tambaleo residual del objetivo de cámara.
     const aglCrudo = this.alturaSuelo(display);
@@ -793,7 +868,7 @@ export class EscenaTres {
     }
     this.ultimoT = sample.t;
 
-    const display = this.displayDron(sample);
+    const display = this.displayDron(sample, dt);
     const aglDron = this.alturaSuelo(display);
     const puntoBelly = enuATres(
       [display[0], display[1], display[2] - 0.236],
@@ -829,7 +904,8 @@ export class EscenaTres {
     this.mundo.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (mesh.isMesh) {
-        mesh.geometry?.dispose();
+        // Las geometrías compartidas (personas) sobreviven a la escena.
+        if (!mesh.geometry.userData.compartida) mesh.geometry?.dispose();
         const mat = mesh.material;
         if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
         else mat?.dispose();
