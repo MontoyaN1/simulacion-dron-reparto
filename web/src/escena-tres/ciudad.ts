@@ -168,7 +168,6 @@ interface CajaGradosJson {
 const mallaRelieve = (
   corredor: RouteGroundTable,
   caja: CajaGradosJson,
-  lateral: number,
   filas: number,
   cols: number,
   hundido: number,
@@ -181,19 +180,42 @@ const mallaRelieve = (
   ];
   const LADO: Vec3 = [-DIRECCION[1], DIRECCION[0], 0];
 
+  // La malla cubre EXACTAMENTE la caja geodésica de la ortofoto: los 4
+  // vértices de la caja proyectados al marco de la ruta dan el along/lateral
+  // (la amplia llega a ±10 km along, no solo los 4 km de la ruta).
+  const proyeccion = ([lat, lon]: [number, number]): [number, number] => {
+    const enu = geodeticToEnu(
+      { latitude: lat, longitude: lon, altitude: 0 },
+      routeFrame.originGeodetic,
+    );
+    return [enu[0] * DIRECCION[0] + enu[1] * DIRECCION[1], enu[0] * LADO[0] + enu[1] * LADO[1]];
+  };
+  const esquinas = [
+    proyeccion([caja.lat_min, caja.lon_min]),
+    proyeccion([caja.lat_min, caja.lon_max]),
+    proyeccion([caja.lat_max, caja.lon_min]),
+    proyeccion([caja.lat_max, caja.lon_max]),
+  ];
+  const alongMin = Math.min(...esquinas.map((e) => e[0]));
+  const alongMax = Math.max(...esquinas.map((e) => e[0]));
+  const latMin = Math.min(...esquinas.map((e) => e[1]));
+  const latMax = Math.max(...esquinas.map((e) => e[1]));
+
   const posiciones: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
 
   for (let fila = 0; fila <= filas; fila += 1) {
-    const along = (medio * fila) / filas;
+    const along = alongMin + ((alongMax - alongMin) * fila) / filas;
     for (let col = 0; col <= cols; col += 1) {
-      const lat = -lateral + (2 * lateral * col) / cols;
+      const lat = latMin + ((latMax - latMin) * col) / cols;
       const enu: Vec3 = [
         DIRECCION[0] * along + LADO[0] * lat,
         DIRECCION[1] * along + LADO[1] * lat,
         0,
       ];
+      // La tabla del corredor solo cubre la franja: fuera de ella el terreno
+      // queda plano al nivel del ancla (el relieve del DEM amplio: pendiente).
       const agl = (corredor.agl(enu) ?? CITY_GROUND_HEIGHT) - CITY_GROUND_HEIGHT;
       posiciones.push(enu[0], agl - hundido, enu[1]);
 
@@ -253,7 +275,7 @@ const edificiosFusionados = async (
   const data = (await response.json()) as {
     features?: {
       geometry?: { type?: string; coordinates?: readonly (readonly (readonly [number, number])[])[] };
-      properties?: { height?: number | null; levels?: number | null };
+      properties?: { height?: number | null; levels?: number | null; name?: string | null };
     }[];
   };
 
@@ -305,19 +327,53 @@ const edificiosFusionados = async (
     forma.closePath();
     const geo = new THREE.ExtrudeGeometry(forma, { depth: altura, bevelEnabled: false });
     geo.rotateX(-Math.PI / 2);
-    geo.translate(0, suelo + 0.12, 0);
-
-    const colorBase = new THREE.Color("#b3aa9e");
-    const tinte = PALETTE_TINTE[index % PALETTE_TINTE.length];
-    colorBase.multiply(new THREE.Color(tinte));
-    const cuentaVertices = geo.attributes.position.count;
-    const colores = new Float32Array(cuentaVertices * 3);
-    for (let v = 0; v < cuentaVertices; v += 1) {
-      colores[v * 3] = colorBase.r;
-      colores[v * 3 + 1] = colorBase.g;
-      colores[v * 3 + 2] = colorBase.b;
+    // Clase y color: puerto de desktop (TINTES×BASE para normales, paleta
+    // institucional para landmarks de la UIS y del campus UTS).
+    const clase = clasificar(
+      feature.properties?.name ?? null,
+      [centro[0], centro[1]],
+      altura,
+      routeFrame.displacement,
+    );
+    const colorBase = new THREE.Color();
+    if (clase === "normal") {
+      const tinte = TINTES[index % TINTES.length];
+      colorBase.setRGB(
+        BASE[0] * tinte[0],
+        BASE[1] * tinte[1],
+        BASE[2] * tinte[2],
+        THREE.SRGBColorSpace,
+      );
+    } else {
+      const [r, g, b] = COLOR_CLASE[clase];
+      colorBase.setRGB(r, g, b, THREE.SRGBColorSpace);
     }
+    const colorTecho = colorBase.clone().multiplyScalar(0.72);
+    // UVs métricas y techo oscurecido: puerto de emitir_edificio de desktop
+    // (u = largo/bahía, v = alto/PISO_M; techo plano en UV_MURO ×0.72).
+    geo.computeVertexNormals();
+    const posiciones = geo.attributes.position;
+    const normales = geo.attributes.normal;
+    const uvs = new Float32Array(posiciones.count * 2);
+    const colores = new Float32Array(posiciones.count * 3);
+    for (let v = 0; v < posiciones.count; v += 1) {
+      if (normales.getY(v) > 0.5) {
+        uvs[v * 2] = UV_MURO[0];
+        uvs[v * 2 + 1] = UV_MURO[1];
+        colores[v * 3] = colorTecho.r;
+        colores[v * 3 + 1] = colorTecho.g;
+        colores[v * 3 + 2] = colorTecho.b;
+      } else {
+        uvs[v * 2] = (posiciones.getX(v) + posiciones.getZ(v)) / BAY;
+        uvs[v * 2 + 1] = posiciones.getY(v) / PISO_M;
+        colores[v * 3] = colorBase.r;
+        colores[v * 3 + 1] = colorBase.g;
+        colores[v * 3 + 2] = colorBase.b;
+      }
+    }
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
     geo.setAttribute("color", new THREE.BufferAttribute(colores, 3));
+    geo.translate(0, suelo + 0.12, 0);
     piezas.push(geo);
     cuenta += 1;
   }
@@ -328,7 +384,116 @@ const edificiosFusionados = async (
   return { geo: fusion, cuenta };
 };
 
-const PALETTE_TINTE = ["#b8b0a3", "#a89583", "#b6bfc3", "#c0b39b", "#9fa9ad", "#b99a86"];
+// Paleta y clasificación de edificios: puerto de desktop/src/escena.rs
+// (TINTES/BASE/clasificar/textura_fachada). Los sRGB se convierten a lineal
+// en setRGB(…, SRGBColorSpace), igual que el `powf(2.2)` de desktop.
+const TINTES: [number, number, number][] = [
+  [0.722, 0.69, 0.639],
+  [0.659, 0.584, 0.514],
+  [0.714, 0.749, 0.765],
+  [0.753, 0.702, 0.608],
+  [0.624, 0.663, 0.678],
+  [0.725, 0.604, 0.525],
+];
+const BASE: [number, number, number] = [0.702, 0.667, 0.62];
+/** Altura de piso para el ritmo de ventanas de la fachada (metros). */
+const PISO_M = 3.3;
+/** Ancho de bahía en metros (desktop usa 3.6 en normales, 3.0–3.2 en landmarks). */
+const BAY = 3.6;
+/** UV que cae en muro liso de la textura de fachada (techos). */
+const UV_MURO: [number, number] = [0.15, 0.5];
+const SRGB_CAMPUS_UTS: [number, number, number] = [0.75, 0.76, 0.79];
+const SRGB_LADRILLO: [number, number, number] = [0.64, 0.46, 0.36];
+const SRGB_INSTITUCIONAL: [number, number, number] = [0.78, 0.79, 0.81];
+const SRGB_CREMA: [number, number, number] = [0.84, 0.8, 0.72];
+const SRGB_OCRE: [number, number, number] = [0.78, 0.58, 0.36];
+
+type Clase =
+  | "normal"
+  | "uts"
+  | "torreUts"
+  | "ocre"
+  | "casona"
+  | "herencia"
+  | "institucional";
+
+const COLOR_CLASE: Record<Exclude<Clase, "normal">, [number, number, number]> = {
+  uts: SRGB_CAMPUS_UTS,
+  torreUts: SRGB_CAMPUS_UTS,
+  ocre: SRGB_OCRE,
+  casona: SRGB_CREMA,
+  herencia: SRGB_LADRILLO,
+  institucional: SRGB_INSTITUCIONAL,
+};
+
+/** Tipo de edificio. Los landmarks de campus llevan puerta de distancia:
+ * la UIS está a ~4 km del ancla UTS (origen ENU) y viceversa. */
+const clasificar = (
+  nombre: string | null,
+  centro: [number, number],
+  alto: number,
+  destino: Vec3,
+): Clase => {
+  const dUis = Math.hypot(centro[0] - destino[0], centro[1] - destino[1]);
+  const dUts = Math.hypot(centro[0], centro[1]);
+  if (dUis < 500) {
+    if (nombre?.includes("Ciencias Humanas 2")) return "ocre";
+    if (nombre?.includes("Casona")) return "casona";
+    if (nombre?.includes("Biblioteca")) return "herencia";
+    if (nombre?.includes("UIS") || nombre?.includes("USI")) return "institucional";
+  }
+  if (dUts < 350) {
+    if (alto >= 24) return "torreUts";
+    if (alto >= 10) return "uts";
+  }
+  return "normal";
+};
+
+let fachadaTex: THREE.Texture | null = null;
+
+/** Textura de fachada procedural: 128×128 px = 1 bahía × 1 piso, sin costuras
+ * (la banda de losa es idéntica en el borde superior e inferior del módulo). */
+const texturaFachada = (): THREE.Texture => {
+  if (fachadaTex) return fachadaTex;
+  let imagen: THREE.Texture;
+  if (typeof document === "undefined") {
+    // jsdom/node no tiene canvas 2d: textura uniforme mínima.
+    imagen = new THREE.DataTexture(new Uint8Array([240, 237, 230, 255]), 1, 1);
+    imagen.needsUpdate = true;
+  } else {
+    const M = 128;
+    const canvas = document.createElement("canvas");
+    canvas.width = M;
+    canvas.height = M;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      imagen = new THREE.DataTexture(new Uint8Array([240, 237, 230, 255]), 1, 1);
+      imagen.needsUpdate = true;
+    } else {
+      ctx.fillStyle = "#f2efe8"; // muro
+      ctx.fillRect(0, 0, M, M);
+      ctx.fillStyle = "#d4d0c6"; // losa (bandas idénticas: sin costura)
+      ctx.fillRect(0, 0, M, 8);
+      ctx.fillRect(0, M - 8, M, 8);
+      ctx.fillStyle = "#ddd9cf"; // antepecho
+      ctx.fillRect(30, 8, 68, 4);
+      ctx.fillStyle = "#4a586c"; // vidrio
+      ctx.fillRect(32, 12, 64, M - 24);
+      ctx.fillStyle = "#e4e1d8"; // marco: dintel y montantes
+      ctx.fillRect(30, M - 12, 68, 4);
+      ctx.fillRect(30, 12, 2, M - 24);
+      ctx.fillRect(96, 12, 2, M - 24);
+      ctx.fillRect(63, 12, 2, M - 24);
+      imagen = new THREE.CanvasTexture(canvas);
+    }
+  }
+  imagen.colorSpace = THREE.SRGBColorSpace;
+  // UVs métricas (u = metros/bahía): la textura repite por fachada.
+  imagen.wrapS = THREE.RepeatWrapping;
+  imagen.wrapT = THREE.RepeatWrapping;
+  fachadaTex = imagen;
+  return imagen;
+};
 
 export interface CiudadTres {
   grupo: THREE.Group;
@@ -371,8 +536,13 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
   const edificios = edifGeo
     ? new THREE.Mesh(
         edifGeo,
-        // Toon (anime) + vertexColors de la fusión; proyecta y recibe sombras.
-        new THREE.MeshToonMaterial({ vertexColors: true, side: THREE.DoubleSide }),
+        // Toon + vertexColors de clase + fachada procedural de ventanas,
+        // muestreada con UVs métricas. Igual que desktop: techo en UV_MURO.
+        new THREE.MeshToonMaterial({
+          vertexColors: true,
+          side: THREE.DoubleSide,
+          map: texturaFachada(),
+        }),
       )
     : null;
   if (edificios) {
@@ -385,7 +555,7 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
   const cajaAmplio = (await import("./mapa-amplio-caja.json")).default as CajaGradosJson;
   const texturaAmplio = await cargarTextura("/models/mapa-amplio.jpg");
   if (texturaAmplio) {
-    const mallaAmplio = mallaRelieve(corredor, cajaAmplio, 9712, 30, 30, 5);
+    const mallaAmplio = mallaRelieve(corredor, cajaAmplio, 30, 30, 5);
     grupo.add(new THREE.Mesh(mallaAmplio, new THREE.MeshStandardMaterial({ map: texturaAmplio, roughness: 1, metalness: 0 })));
   }
 
@@ -393,7 +563,7 @@ export const construirCiudad = async (corredor: RouteGroundTable): Promise<Ciuda
   const cajaMedio = (await import("./mapa-medio-caja.json")).default as CajaGradosJson;
   const texturaMedio = await cargarTextura("/models/mapa-medio.jpg");
   if (texturaMedio) {
-    const mallaMedio = mallaRelieve(corredor, cajaMedio, 4906, 40, 40, 3);
+    const mallaMedio = mallaRelieve(corredor, cajaMedio, 40, 40, 3);
     grupo.add(new THREE.Mesh(mallaMedio, new THREE.MeshStandardMaterial({ map: texturaMedio, roughness: 1, metalness: 0 })));
   }
 

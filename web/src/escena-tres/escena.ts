@@ -115,7 +115,8 @@ export class EscenaTres {
       FOV,
       Math.max(0.1, container.clientWidth / Math.max(1, container.clientHeight)),
       0.4,
-      9000,
+      // La capa amplia llega a ±9.7 km: sin este far se recorta la ciudad.
+      22000,
     );
     this.camara.position.set(0, 220, -420);
     this.camara.lookAt(0, 0, 0);
@@ -138,7 +139,9 @@ export class EscenaTres {
       this.rig.dist = Math.max(3, Math.min(60, this.rig.dist * Math.exp(dy * 0.001)));
     }, { passive: false });
     this.mundo.background = new THREE.Color("#8fb4d8");
-    this.mundo.fog = new THREE.Fog(new THREE.Color("#a9c4dd"), 1600, 4600);
+    // Bruma: desktop deja ver toda la ciudad (±8 km); con 4600 la capa
+    // amplia desaparecía por completo tras el horizonte.
+    this.mundo.fog = new THREE.Fog(new THREE.Color("#a9c4dd"), 2600, 11000);
 
     const hemisferio = new THREE.HemisphereLight(0xcfe7ff, 0x4a5d33, 1.15);
     const sol = new THREE.DirectionalLight(0xfff2d6, 1.35);
