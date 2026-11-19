@@ -529,7 +529,7 @@ export class EscenaTres {
    * total, con color de ropa y de piel por persona. Las geometrías se crean
    * una sola vez y se reutilizan en cada reconstrucción de la ruta. */
   private colocarPersonas(inicio: THREE.Vector3, fin: THREE.Vector3): void {
-    const POR_PLAZA = 12;
+    const POR_PLAZA = 30;
     for (const malla of this.personas) {
       this.mundo.remove(malla);
       (malla.material as THREE.Material).dispose();

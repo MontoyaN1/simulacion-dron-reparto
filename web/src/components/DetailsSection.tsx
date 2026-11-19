@@ -225,7 +225,7 @@ function buildTopics(live: LiveAlgebra | null): Topic[] {
     {
       topic: "Núcleo e imagen",
       detail: "ker P = ⟨k̂⟩ · Im P = plano xy",
-      value: "nulidad 1 · rango 2",
+      value: `nulidad 1 · rango 2 · Im P(p) = ${fmtVector(live.ground, 1)}`,
     },
     {
       topic: "Matriz, rango e isomorfismo",
