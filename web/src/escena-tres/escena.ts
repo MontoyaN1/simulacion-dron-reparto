@@ -3,6 +3,7 @@ import { WebGPURenderer, PostProcessing } from "three/webgpu";
 import { pass } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
 import { calcularFps, detectarBackend, webgpuDisponible, type Backend } from "./render";
 import { degradarPorFps, type EstadoVisual } from "./visual";
@@ -80,6 +81,18 @@ export class EscenaTres {
   private readonly dirCorredor: THREE.Vector3;
   private readonly ladoCorredor: THREE.Vector3;
   private objetivoCamara = new THREE.Vector3();
+  /** Altura del terreno bajo la cámara/drón filtrada en baja frecuencia: el
+   * DEM por celdas escalona y esa escalera era el tambaleo residual. */
+  private aglCamara: number | null = null;
+  /** Personas low-poly en las plazoletas (una InstancedMesh = un draw call). */
+  private personas: THREE.InstancedMesh | null = null;
+  private readonly ultimaPosDron = new THREE.Vector3();
+  /** Transición animada de cámara al Reiniciar o cambiar el sentido. */
+  private transicion: {
+    desde: THREE.Vector3;
+    hasta: THREE.Vector3;
+    t0: number;
+  } | null = null;
   private destruida = false;
   private rafId = 0;
   private lastFrame = performance.now();
@@ -447,12 +460,77 @@ export class EscenaTres {
     );
     this.ruta.geometry.dispose();
     this.ruta.geometry = new THREE.BufferGeometry().setFromPoints(puntos);
-    const caja = new THREE.Box3().setFromPoints(puntos);
-    const centro = caja.getCenter(new THREE.Vector3());
-    this.camara.position.set(centro.x, centro.y + 380, centro.z - 40);
-    this.camara.lookAt(centro);
+    this.establecerCamara();
+    this.colocarPersonas(puntos[0], puntos[puntos.length - 1]);
+  }
+
+  /** Corte SUAVE a plano general del corredor (desktop: vista_amplia en los
+   * primeros 2.4 s). Vuela la cámara hasta el encuadre en ~1.5 s en vez de
+   * teletransportarla: Reiniciar y el cambio de sentido quedan con animación. */
+  establecerCamara(): void {
+    if (this.ruta.geometry.getAttribute("position")) {
+      const caja = new THREE.Box3().setFromObject(this.ruta);
+      const centro = caja.getCenter(new THREE.Vector3());
+      this.transicion = {
+        desde: this.camara.position.clone(),
+        hasta: new THREE.Vector3(centro.x, centro.y + 380, centro.z - 40),
+        t0: performance.now(),
+      };
+    }
     this.camaraBloqueada = true;
-    this.liberarCamaraEn = performance.now() + 2400;
+    this.liberarCamaraEn = performance.now() + 2600;
+    this.aglCamara = null;
+  }
+
+  /** Personas low-poly en las plazoletas de la UTS y la UIS: una sola
+   * InstancedMesh (un draw call) con colores por instancia. */
+  private colocarPersonas(inicio: THREE.Vector3, fin: THREE.Vector3): void {
+    const POR_PLAZA = 12;
+    if (this.personas) {
+      this.mundo.remove(this.personas);
+      this.personas.dispose();
+      this.personas = null;
+    }
+    const cuerpo = new THREE.CylinderGeometry(0.16, 0.22, 1.05, 6);
+    cuerpo.translate(0, 0.6, 0);
+    const cabeza = new THREE.SphereGeometry(0.13, 8, 6);
+    cabeza.translate(0, 1.28, 0);
+    const geo = mergeGeometries([cuerpo, cabeza]);
+    if (!geo) return;
+    const personas = new THREE.InstancedMesh(
+      geo,
+      new THREE.MeshLambertMaterial(),
+      POR_PLAZA * 2,
+    );
+    const ROPA = [0x4a5568, 0x718096, 0x8b6f47, 0x5d6b7a, 0x975a4e, 0x6b705c];
+    const matriz = new THREE.Matrix4();
+    const color = new THREE.Color();
+    let semilla = 7;
+    const azar = (): number => {
+      semilla = (semilla * 16807) % 2147483647;
+      return semilla / 2147483647;
+    };
+    let i = 0;
+    for (const base of [inicio, fin]) {
+      for (let k = 0; k < POR_PLAZA; k += 1) {
+        const angulo = (k / POR_PLAZA) * Math.PI * 2 + azar() * 0.6;
+        const radio = 6 + azar() * 8;
+        const x = base.x + Math.cos(angulo) * radio;
+        const z = base.z + Math.sin(angulo) * radio;
+        // De pie sobre la plazoleta, mirando hacia el punto de entrega.
+        matriz.makeRotationY(Math.atan2(base.x - x, base.z - z));
+        matriz.setPosition(x, base.y, z);
+        personas.setMatrixAt(i, matriz);
+        color.setHex(ROPA[i % ROPA.length]);
+        personas.setColorAt(i, color);
+        i += 1;
+      }
+    }
+    personas.instanceMatrix.needsUpdate = true;
+    if (personas.instanceColor) personas.instanceColor.needsUpdate = true;
+    personas.castShadow = true;
+    this.mundo.add(personas);
+    this.personas = personas;
   }
 
   setCameraMode(modo: CameraMode): void {
@@ -544,12 +622,32 @@ export class EscenaTres {
    * heredado del legacy venía de eso). */
   private camaraActualiza(sample: Telemetry, dt: number): void {
     const display = this.displayDron(sample);
-    const agl = this.alturaSuelo(display);
+    // El DEM por celdas salta al cruzar una celda (48×75 m): filtrado en baja
+    // frecuencia desaparece el tambaleo residual del objetivo de cámara.
+    const aglCrudo = this.alturaSuelo(display);
+    if (this.aglCamara === null) this.aglCamara = aglCrudo;
+    this.aglCamara += (aglCrudo - this.aglCamara) * (1 - Math.exp(-1.5 * dt));
+    const agl = this.aglCamara;
     const pos = new THREE.Vector3(display[0], agl + display[2], display[1]);
     this.objetivoCamara.copy(pos);
+    // Teletransporte (Reiniciar/Sentido): corte animado a plano general en
+    // vez de volar la cámara 4 km atravesando la ciudad.
+    if (this.ultimaPosDron.lengthSq() > 0 && pos.distanceTo(this.ultimaPosDron) > 300) {
+      this.establecerCamara();
+    }
+    this.ultimaPosDron.copy(pos);
     if (this.camaraBloqueada) {
-      // Plano de establecimiento: la cámara está lejos, pero sigue apuntando
-      // al dron para que nunca salga de cuadro mientras dura el plano.
+      // Transición: vuela la cámara hasta el plano general con ease cúbico,
+      // mirando siempre al dron; luego espera la liberación como desktop.
+      if (this.transicion) {
+        const transcurrido = Math.min(1, (performance.now() - this.transicion.t0) / 1500);
+        const pulso =
+          transcurrido < 0.5
+            ? 4 * transcurrido ** 3
+            : 1 - (-2 * transcurrido + 2) ** 3 / 2;
+        this.camara.position.lerpVectors(this.transicion.desde, this.transicion.hasta, pulso);
+        if (transcurrido >= 1) this.transicion = null;
+      }
       this.camara.lookAt(pos);
       if (performance.now() < this.liberarCamaraEn) return;
       this.camaraBloqueada = false;
@@ -688,17 +786,10 @@ export class EscenaTres {
         return;
       }
 
-    // Reset del servidor: repetir el encuadre amplio evita que el primer
-    // frame lleve la cámara dentro de los edificios del pad.
+    // Reset del servidor: corte suave a plano general (mismo encuadre que al
+    // cargar) para que el primer frame no nazca dentro de los edificios.
     if (sample.t + 1 < this.ultimoT) {
-      this.camaraBloqueada = true;
-      this.liberarCamaraEn = ahora + 2400;
-      if (this.ruta.geometry.getAttribute("position")) {
-        const caja = new THREE.Box3().setFromObject(this.ruta);
-        const centro = caja.getCenter(new THREE.Vector3());
-        this.camara.position.set(centro.x, centro.y + 380, centro.z - 40);
-        this.camara.lookAt(centro);
-      }
+      this.establecerCamara();
     }
     this.ultimoT = sample.t;
 
@@ -742,6 +833,8 @@ export class EscenaTres {
         const mat = mesh.material;
         if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
         else mat?.dispose();
+        // Las instancias (personas) liberan además sus matrices/colores.
+        if ((mesh as THREE.InstancedMesh).isInstancedMesh) mesh.dispose();
       }
     });
     this.post?.dispose?.();
