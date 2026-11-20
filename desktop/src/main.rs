@@ -67,8 +67,25 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.72, 0.78, 0.87)))
         .insert_resource(Time::<Fixed>::from_hz(1.0 / nucleo::DT_FIJO))
         .add_systems(bevy_egui::EguiPrimaryContextPass, hud)
+        .add_systems(Startup, fuentes)
         .add_systems(Update, (captura, fps_promedio))
         .run();
+}
+
+/// La flecha → existe en Hack (mono) pero no en Ubuntu-Light (proporcional).
+/// egui solo hace fallback de glifos dentro de una misma FontFamily, así que
+/// Hack entra como respaldo en Proportional y se aplica una sola vez.
+fn fuentes(mut contexts: EguiContexts) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    ctx.set_fonts({
+        let mut d = egui::FontDefinitions::default();
+        if let Some(pro) = d.families.get_mut(&egui::FontFamily::Proportional) {
+            pro.push("Hack".to_owned());
+        }
+        d
+    });
 }
 
 fn nombre_fase(fase: Fase) -> &'static str {
@@ -266,7 +283,17 @@ fn hud(
                     );
                 });
                 ui.add_space(14.0);
-                if camara.libre {
+                if camara.cine {
+                    ui.label(
+                        egui::RichText::new("CÁMARA CINE")
+                            .color(ACENTO)
+                            .monospace()
+                            .size(12.0),
+                    );
+                    if boton(ui, "SEGUIR DRON", false) {
+                        camara.cine = false;
+                    }
+                } else if camara.libre {
                     ui.label(
                         egui::RichText::new("CÁMARA LIBRE")
                             .color(AMBAR)
@@ -329,7 +356,12 @@ fn hud(
             egui::Frame::NONE
                 .fill(FONDO)
                 .stroke(egui::Stroke::new(1.0_f32, BORDE))
-                .inner_margin(egui::Margin::symmetric(16, 10)),
+                .inner_margin(egui::Margin {
+                    left: 16,
+                    right: 16,
+                    top: 9,
+                    bottom: 7,
+                }),
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -341,29 +373,36 @@ fn hud(
                     metrica(ui, clave, valor);
                     ui.add_space(18.0);
                 }
-                ui.vertical(|ui| {
-                    ui.add_space(4.0);
-                    ui.add(
-                        egui::ProgressBar::new(m.progreso as f32)
-                            .desired_width(230.0)
-                            .fill(ACENTO)
-                            .text(format!("{:.0} % del corredor", m.progreso * 100.0)),
+                // Ayuda de teclas: a la derecha, su propia fila y siempre
+                // completa (antes se cortaba contra el borde derecho).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "arrastra: orbitar · rueda: zoom · R: seguir · C: cine · M: modelo · T: sentido",
+                        )
+                        .color(TENUE)
+                        .size(9.5),
                     );
-                    // Ayuda de teclas bajo la barra y alineada a la derecha:
-                    // en la fila de métricas se montaba sobre RECORRIDO.
-                    for linea in [
-                        "arrastra: orbitar · rueda: zoom",
-                        "R: seguir dron · M: modelo · T: sentido",
-                    ] {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(linea).color(TENUE).size(9.5),
-                            );
-                        });
-                    }
                 });
             });
-            ui.add_space(2.0);
+            ui.add_space(8.0);
+            // Progreso global: barra fina a lo ancho con el % en su propia
+            // etiqueta a la derecha, para que nada se corte contra el borde.
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::ProgressBar::new(m.progreso as f32)
+                        .desired_height(3.0)
+                        .fill(ACENTO)
+                        .text(egui::RichText::new("")),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(format!("{:.0} % del corredor", m.progreso * 100.0))
+                        .color(TENUE)
+                        .monospace()
+                        .size(9.5),
+                );
+            });
         });
 }
 
@@ -384,16 +423,48 @@ fn panel_modelo(ui: &mut egui::Ui, m: &MuestraTelemetria, d: &DatosRuta) {
     });
     ui.add_space(10.0);
     let a = matematica::algebra_en_vivo(&m.posicion, &m.vel, &d.matriz, &d.dir_h);
+    // Scroll visible siempre: antes los 11 temas quedaban cortados por el
+    // borde inferior de la ventana y era imposible saber que había más.
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .show(ui, |ui| {
             tarjeta_ruta(ui, d);
             ui.add_space(12.0);
             tarjeta_matriz(ui, &a, &d.matriz);
             ui.add_space(12.0);
             tarjeta_temas(ui, &a);
+            ui.add_space(12.0);
+            tarjeta_documento(ui, d);
         });
     ui.add_space(12.0);
+}
+
+/// Puente entre el trabajo escrito y la escena real: los objetos del modelo
+/// académico (A = (2,4,0), N 26.57° E, corredor 0.8–1.2, zona Z, viento) no
+/// existen en la geografía de Bucaramanga, y la app vuela la ruta real.
+fn tarjeta_documento(ui: &mut egui::Ui, d: &DatosRuta) {
+    cuadro(ui, |ui| {
+        cabeza(ui, "Modelo del documento", "escalado al vuelo real", false);
+        hecho(ui, "Destino académico", "(2, 4, 0) u");
+        hecho(ui, "Rumbo del modelo", "N 26.57° E");
+        hecho(ui, "Rumbo real", &format!("{:.2}°", d.rumbo));
+        hecho(ui, "Corredor de altura", "z ∈ [0.8, 1.2] u · holgura 0.2 u");
+        hecho(ui, "Plano de la ruta", "2x − y = 0");
+        hecho(ui, "Zona sensible Z", "(3, 2, 0) u · radio 1 u · paso 1.79 u");
+        hecho(ui, "Viento del modelo", "(−1, −1, 0) m/s · 1.34 en contra");
+        hecho(ui, "Plan de vuelo", "1 + 2√5 + 1 ≈ 6.47 u");
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Las coordenadas del documento son simplificadas y no están a escala; esta simulación \
+                 vuela la ruta real UTS → UIS y la reexpresa en unidades del modelo (1 u ≈ \
+                 890.3 m). Por eso el rumbo real es 5.83° y no 26.57°.",
+            )
+            .color(TENUE)
+            .size(10.0),
+        );
+    });
 }
 
 /// Marco con el fondo y el borde de la versión web.
@@ -640,35 +711,57 @@ fn fps_promedio(tiempo: Res<Time>, vuelo: Res<Vuelo>, mut acum: Local<f32>, mut 
     }
 }
 
-/// Con `CAPTURA=1` guarda tres fotogramas del vuelo en `capturas/`.
+/// Decisión pura de captura: devuelve (nombre, índice) si `fase` merece un
+/// fotograma nuevo, y limpia `hechos`/`previa` en `Inactivo` para que cada
+/// vuelo (tras Reiniciar o cambiar Sentido) vuelva a documentar sus fases.
+fn decidir_captura(
+    fase: Fase,
+    previa: &mut Option<Fase>,
+    hechos: &mut Vec<u8>,
+) -> Option<(&'static str, u8)> {
+    if fase == Fase::Inactivo {
+        *hechos = Vec::new();
+        *previa = None;
+        return None;
+    }
+    if Some(fase) == *previa {
+        return None;
+    }
+    *previa = Some(fase);
+    let (nombre, indice) = match fase {
+        Fase::Despegue => ("02-despegue", 0),
+        Fase::Crucero => ("03-crucero", 1),
+        Fase::Descenso => ("04-uis", 2),
+        Fase::Entregado => ("01-presentacion", 3),
+        Fase::Inactivo => return None,
+    };
+    if hechos.contains(&indice) {
+        return None;
+    }
+    hechos.push(indice);
+    Some((nombre, indice))
+}
+
+/// Con `CAPTURA=1` guarda cuatro fotogramas del vuelo en `capturas/`, uno por
+/// fase real del motor. Antes se disparaban por tiempo de pared dividido por la
+/// velocidad, y a 16× las cuatro caían en CRUCERO.
 fn captura(
     mut commands: Commands,
     mut hechos: Local<Vec<u8>>,
-    tiempo: Res<Time>,
-    vel: Res<VelSim>,
+    vuelo: Res<Vuelo>,
+    mut previa: Local<Option<Fase>>,
 ) {
     if std::env::var("CAPTURA").is_err() {
         return;
     }
-    // Marcas en tiempo de simulación; en muro se comprimen por la velocidad
-    // (con un piso de 1.2 s para que la escena alcance a construirse).
-    let marcas: [(f32, &str); 4] = [
-        (3.0, "01-presentacion"),
-        (60.0, "02-despegue"),
-        (150.0, "03-crucero"),
-        (262.0, "04-uis"),
-    ];
-    for (indice, (marca, nombre)) in marcas.into_iter().enumerate() {
-        if tiempo.elapsed_secs() > (marca / vel.0 as f32).max(1.2)
-            && !hechos.contains(&(indice as u8))
-        {
-            hechos.push(indice as u8);
-            let ruta = format!("capturas/{nombre}.png");
-            commands
-                .spawn(Screenshot::primary_window())
-                .observe(save_to_disk(ruta));
-        }
-    }
+    let fase = vuelo.motor.telemetria().fase;
+    let Some((nombre, _)) = decidir_captura(fase, &mut previa, &mut hechos) else {
+        return;
+    };
+    let ruta = format!("capturas/{nombre}.png");
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(ruta));
 }
 
 #[cfg(test)]
@@ -705,5 +798,24 @@ mod pruebas {
         // dirección horizontal de viaje también se voltea
         assert!((di.dir_h[0] + dv.dir_h[0]).abs() < 1e-9);
         assert!((di.dir_h[1] + dv.dir_h[1]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn captura_una_por_fase_y_reinicia_en_inactivo() {
+        let mut previa = None;
+        let mut hechos = Vec::new();
+        // Primer vuelo: cada fase produce su captura exactamente una vez.
+        assert!(decidir_captura(Fase::Despegue, &mut previa, &mut hechos).is_some());
+        assert!(decidir_captura(Fase::Despegue, &mut previa, &mut hechos).is_none());
+        assert!(decidir_captura(Fase::Crucero, &mut previa, &mut hechos).is_some());
+        assert!(decidir_captura(Fase::Descenso, &mut previa, &mut hechos).is_some());
+        assert!(decidir_captura(Fase::Entregado, &mut previa, &mut hechos).is_some());
+        // Un segundo pase por las mismas fases no duplica nada.
+        assert!(decidir_captura(Fase::Crucero, &mut previa, &mut hechos).is_none());
+        // Al volver a tierra (Reiniciar / Sentido) el estado se limpia y el
+        // siguiente vuelo vuelve a documentar sus fases.
+        assert!(decidir_captura(Fase::Inactivo, &mut previa, &mut hechos).is_none());
+        assert!(hechos.is_empty() && previa.is_none());
+        assert!(decidir_captura(Fase::Despegue, &mut previa, &mut hechos).is_some());
     }
 }

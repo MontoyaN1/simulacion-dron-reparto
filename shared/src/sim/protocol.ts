@@ -22,7 +22,8 @@ export type ClientCommand =
   | { readonly type: "pause" }
   | { readonly type: "resume" }
   | { readonly type: "reset" }
-  | { readonly type: "speed"; readonly value: number };
+  | { readonly type: "speed"; readonly value: number }
+  | { readonly type: "sentido" };
 
 export type ServerMessage =
   | { readonly type: "init"; readonly payload: SessionInfo }
@@ -39,6 +40,7 @@ export const isClientCommand = (value: unknown): value is ClientCommand => {
     case "pause":
     case "resume":
     case "reset":
+    case "sentido":
       return true;
     case "speed":
       return typeof candidate.value === "number" && Number.isFinite(candidate.value);

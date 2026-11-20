@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GeodeticPoint, LiveAlgebra, Mat3, Telemetry } from "@dron/shared";
-import { liveAlgebra, norm } from "@dron/shared";
+import { liveAlgebra, norm, routeFrame } from "@dron/shared";
 import { fmt, fmtInt, fmtVector } from "../format";
 import { DataTable } from "./DataTable";
+import { ModeloDocumentoCard } from "./ModeloDocumentoCard";
 
 type Triple = readonly [number, number, number];
 
@@ -224,7 +225,7 @@ function buildTopics(live: LiveAlgebra | null): Topic[] {
     {
       topic: "Núcleo e imagen",
       detail: "ker P = ⟨k̂⟩ · Im P = plano xy",
-      value: "nulidad 1 · rango 2",
+      value: `nulidad 1 · rango 2 · Im P(p) = ${fmtVector(live.ground, 1)}`,
     },
     {
       topic: "Matriz, rango e isomorfismo",
@@ -234,9 +235,21 @@ function buildTopics(live: LiveAlgebra | null): Topic[] {
   ];
 }
 
-export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
+export function DetailsSection({
+  telemetry,
+  sentido = false,
+}: {
+  telemetry: Telemetry | null;
+  sentido?: boolean;
+}) {
   const [frame, setFrame] = useState<FramePayload | null>(null);
   const [planning, setPlanning] = useState<PlanningSummary | null>(null);
+  // Con sentido UIS→UTS la llegada vuelve a ser la UTS (origen del marco):
+  // rumbo +180° y destino académico (0, 0, 0), igual que desktop.
+  const rumboReal = (frame?.bearingDeg ?? routeFrame.bearingDeg) + (sentido ? 180 : 0);
+  const destinoReal: Triple = sentido
+    ? [0, 0, 0]
+    : (frame?.destinationAcademic ?? routeFrame.destinationAcademic);
 
   useEffect(() => {
     let active = true;
@@ -332,7 +345,7 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
             <div>
               <dt>Destino académico</dt>
               <dd className="mono">
-                {frame ? fmtVector(frame.destinationAcademic, 3) : "—"}
+                {frame ? fmtVector(destinoReal, 3) : "—"}
               </dd>
             </div>
             <div>
@@ -411,6 +424,12 @@ export function DetailsSection({ telemetry }: { telemetry: Telemetry | null }) {
           </ul>
         </article>
       </section>
+      <div className="modelo-doc-section">
+        <ModeloDocumentoCard
+          rumboReal={rumboReal}
+          destinoReal={destinoReal}
+        />
+      </div>
       <div className="data-section">
         <DataTable telemetry={telemetry} />
       </div>

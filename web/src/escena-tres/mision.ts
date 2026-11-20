@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { routeFrame, type Telemetry, type Vec3 } from "@dron/shared";
-import { CITY_GROUND_HEIGHT } from "../cesium/constants";
+import { CITY_GROUND_HEIGHT } from "./constants";
 import { enuATres } from "./ciudad";
-import type { RouteGroundTable } from "../cesium/route-ground";
+import type { RouteGroundTable } from "./route-ground";
 import type { MissionState } from "../mision/tipos";
 
 const RADIO_UTS = 16;

@@ -1,8 +1,7 @@
-import type { CameraMode } from "../cesium/constants";
+import type { CameraMode } from "../escena-tres/constants";
 
 /**
- * Estados de la misión compartidos por los dos motores de escena
- * (Cesium y three.js). El HUD cambia sin importar el motor.
+ * Estados de la misión que consume el HUD.
  */
 export type MissionState =
   | "esperando"

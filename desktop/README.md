@@ -77,8 +77,18 @@ Esri World Imagery.
   el campo vive en la componente base `Camera`); el sol lo toma de la
   `DirectionalLight` y una cúpula de 20 km con `nubes.png` aporta las nubes.
 - **Cámara**: persecución automática; arrastrar orbita libre alrededor del
-  dron, la rueda hace zoom y `R` vuelve a seguirlo. Siempre con recorte por
-  raycast contra los edificios.
+  dron, la rueda hace zoom y `R` vuelve a seguirlo. `C` activa una vista
+  cinematográfica adicional: encuadre three-quarter frontal con órbita y zoom
+  lentos, suavizado exponencial y el mismo recorte por raycast; `R` o el ratón
+  regresan a las vistas anteriores, que no cambian.
+- **Modelo anime**: el dron usa un material cel-shading propio (`toon.wgsl`,
+  tres bandas de luz con antialiasing de 1 px, matcap estilizado para el
+  metal y rim cian de silueta) generado desde los PBR del GLB; Strobe y
+  luces son emisivos HDR. Los rotores llevan estelas sutiles (`Estela1..4`)
+  ligadas al régimen: invisibles en tierra, alfa hasta 0.20 en crucero.
+  Bloom moderado (additive, umbral 0.9) y `ColorGrading` (saturación 1.12,
+  contraste 1.05) rematan la imagen; sol cálido y ambiente frío. El shader y
+  las estelas no corren en la versión web.
 - **Terreno por capas**: franja (25 m, z19) sobre media (60 m, z17, ±4 km)
   sobre amplia (100 m, z16, ±8 km); cada capa se hunde un poco para no pelear
   por profundidad, y `agl()` nunca baja del DEM amplio.
@@ -96,8 +106,11 @@ Esri World Imagery.
 - **Dron con vida**: la rotación del fuselaje se calcula cada frame con las
   mismas convenciones que el cliente de referencia (euler XYZ sobre la base
   -π/2/π): rumbo real, cabeceo proporcional a la velocidad y al ascenso,
-  alabeo en las curvas y vaiven de hover; los rotores giran a 4× el ciclo del
-  glTF (~25 rad/s).
+  alabeo en las curvas y vaiven de hover. Los rotores giran por código (Bevy
+  0.16 no evalúa animaciones de glTF embebidas en escenas) con régimen
+  variable (4.5 + 1.4·v, máx 14 rev/s), rampa de arranque/aterrizaje y giro
+  alternado por motor; el estrobo trasero hace doble destello cada segundo.
+  La animación embebida del GLB se conserva para la web (Cesium la reproduce).
 - **Texturas**: anisotropía 16 en el sampler por defecto; sin ella la
   ortofoto se ve en bloques al verla de canto.
 - **Iluminación**: sol direccional inclinado + relleno de ambiente. En Bevy

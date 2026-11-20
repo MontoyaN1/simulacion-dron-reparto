@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClientCommand, SimulationStatus, Telemetry, Vec3 } from "@dron/shared";
-import { createWorldFrame } from "../cesium/world";
-import { CAMERA_MODES, type CameraMode } from "../cesium/constants";
-import { DroneScene } from "../cesium/scene";
+import { CAMERA_MODES, type CameraMode } from "../escena-tres/constants";
 import { MISSION_STATE_LABEL } from "../mision/tipos";
 import type { MissionState } from "../mision/tipos";
-import { RouteGroundTable } from "../cesium/route-ground";
+import { RouteGroundTable } from "../escena-tres/route-ground";
 import { EscenaTres } from "../escena-tres/escena";
 import type { TelemetryBuffer } from "../sim/buffer";
 import { PHASE_LABELS, fmt, fmtClock, fmtInt } from "../format";
@@ -17,21 +15,28 @@ interface Props {
   status: SimulationStatus;
   connected: boolean;
   send: (command: ClientCommand) => void;
+  /** Sentido vigente (UTS→UIS = false). El botón alterna y App refresca. */
+  sentido?: boolean;
+  onSentido?: () => void;
 }
 
-const SPEEDS = [1, 2, 4] as const;
+const SPEEDS = [1, 2, 4, 8, 16] as const;
 
-export function SimulationStage({ buffer, route, telemetry, status, connected, send }: Props) {
+export function SimulationStage({
+  buffer,
+  route,
+  telemetry,
+  status,
+  connected,
+  send,
+  sentido = false,
+  onSentido,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<DroneScene | EscenaTres | null>(null);
-  const sendRef = useRef(send);
-  const [cameraMode, setCameraMode] = useState<CameraMode>("chase");
+  const sceneRef = useRef<EscenaTres | null>(null);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("seguir");
   const [missionState, setMissionState] = useState<MissionState>("esperando");
-  const [sequenceHold, setSequenceHold] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
-  sendRef.current = send;
-
-  const motor = new URLSearchParams(window.location.search).get("motor") ?? "tres";
 
   useEffect(() => {
     let frames = 0;
@@ -54,33 +59,9 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const params = new URLSearchParams(window.location.search);
-    const motor = params.get("motor") ?? "tres";
-    const corredor = new RouteGroundTable();
-    // El archivo versionado de alturas cubre el corredor: el muestreo en
-    // vivo (ion) queda como respaldo y no necesita el token en el cliente.
-    void corredor.cargar({ world: createWorldFrame() });
-    let escenaActual: DroneScene | EscenaTres;
-    try {
-      escenaActual =
-        motor === "cesium"
-          ? new DroneScene(host)
-          : new EscenaTres(host, { corredor });
-    } catch (error) {
-      console.warn("[escena] El motor three falló; se usa Cesium", error);
-      escenaActual = new DroneScene(host);
-    }
-    const scene = escenaActual;
+    const scene = new EscenaTres(host, { corredor: new RouteGroundTable() });
     scene.attachBuffer(buffer);
     scene.attachMissionState((state) => setMissionState(state));
-    // Cesium lleva secuencia de personas y congela la simulación; three es
-    // misión continua y no la usa.
-    if ("attachHold" in scene) {
-      scene.attachHold((hold: boolean) => {
-        setSequenceHold(hold);
-        sendRef.current(hold ? { type: "pause" } : { type: "resume" });
-      });
-    }
 
     sceneRef.current = scene;
     return () => {
@@ -97,6 +78,24 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     sceneRef.current?.setCameraMode(cameraMode);
   }, [cameraMode]);
 
+  // Escena → HUD: el arrastre del ratón cambia el modo dentro de la escena
+  // (órbita libre) y los botones deben reflejarlo.
+  useEffect(() => {
+    sceneRef.current?.attachCameraMode(setCameraMode);
+  }, []);
+
+  // Atajos de desktop: R vuelve a seguir al dron, C alterna la cámara cine.
+  useEffect(() => {
+    const teclas = (evento: KeyboardEvent) => {
+      if (evento.key === "r" || evento.key === "R") setCameraMode("seguir");
+      if (evento.key === "c" || evento.key === "C") {
+        setCameraMode((modo) => (modo === "cine" ? "seguir" : "cine"));
+      }
+    };
+    window.addEventListener("keydown", teclas);
+    return () => window.removeEventListener("keydown", teclas);
+  }, []);
+
   const running = status.running;
   const primaryLabel = status.delivered
       ? "Entregado"
@@ -107,7 +106,7 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
           : "Iniciar vuelo";
 
   const handlePrimary = (): void => {
-    if (status.delivered || sequenceHold) return;
+    if (status.delivered) return;
     send({ type: running ? "pause" : "start" });
   };
 
@@ -118,32 +117,28 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
     <section className="stage" aria-label="Escena 3D de la simulación">
       <div className="stage-host" ref={hostRef} />
 
-      <div className="mission-chip" role="status">
-        <span className={`mission-dot mission-${missionState}`} />
-        <span className="mission-label">{MISSION_STATE_LABEL[missionState]}</span>
-      </div>
-
-      <div className="fps-panel" role="status">
-        <span className="fps-motor">{motor === "cesium" ? "Cesium" : "three"}</span>
-        <span className="fps-valor mono">{fps === null ? "—" : `${fps} fps`}</span>
-      </div>
-
       <div className="stage-top">
         <div className="stage-heading">
           <p className="eyebrow">UTS → UIS · Bucaramanga</p>
           <h1>Simulación en vivo</h1>
         </div>
-        <div className="segmented" role="group" aria-label="Modo de cámara">
-          {CAMERA_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              className={cameraMode === mode.id ? "segmented-item is-active" : "segmented-item"}
-              onClick={() => setCameraMode(mode.id)}
-            >
-              {mode.label}
-            </button>
-          ))}
+        <div className="camara-fps">
+          <div className="segmented" role="group" aria-label="Modo de cámara">
+            {CAMERA_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                className={cameraMode === mode.id ? "segmented-item is-active" : "segmented-item"}
+                onClick={() => setCameraMode(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+          <div className="fps-panel" role="status">
+            <span className="fps-motor">three</span>
+            <span className="fps-valor mono">{fps === null ? "—" : `${fps} fps`}</span>
+          </div>
         </div>
       </div>
 
@@ -184,13 +179,18 @@ export function SimulationStage({ buffer, route, telemetry, status, connected, s
             type="button"
             className="button button-primary"
             onClick={handlePrimary}
-            disabled={status.delivered || sequenceHold}
+            disabled={status.delivered}
           >
             {primaryLabel}
           </button>
           <button type="button" className="button" onClick={() => send({ type: "reset" })}>
             Reiniciar
           </button>
+          {onSentido && (
+            <button type="button" className="button" onClick={onSentido}>
+              Sentido: {sentido ? "UIS → UTS" : "UTS → UIS"}
+            </button>
+          )}
           <div className="segmented" role="group" aria-label="Velocidad de simulación">
             {SPEEDS.map((speed) => (
               <button
