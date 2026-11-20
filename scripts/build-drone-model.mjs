@@ -19,11 +19,18 @@ class Geometry {
   positions = [];
   normals = [];
   indices = [];
+  colors = [];
 
   vertex(position, normal) {
     const index = this.positions.length / 3;
     this.positions.push(...position);
     this.normals.push(...normal);
+    return index;
+  }
+
+  vertexColor(position, normal, color) {
+    const index = this.vertex(position, normal);
+    this.colors.push(...color);
     return index;
   }
 
@@ -121,20 +128,183 @@ const ellipsoid = (center, radii, segments = 20, rings = 12) => {
   return geometry;
 };
 
+const signedPow = (value, exponent) => Math.sign(value) * Math.abs(value) ** exponent;
+
+// Elipsoide supercuadrático: casco redondeado con paneles menos "globo" que
+// una esfera, pero normales continuas (nada de caja low-poly).
+const superellipsoid = (center, radii, exponent = 0.65, segments = 40, rings = 20) => {
+  const geometry = new Geometry();
+  const normalExponent = 2 / exponent - 1;
+  for (let ring = 0; ring <= rings; ring += 1) {
+    const phi = (ring / rings) * Math.PI;
+    for (let segment = 0; segment <= segments; segment += 1) {
+      const theta = (segment / segments) * TAU;
+      const unit = [
+        signedPow(Math.sin(phi), exponent) * signedPow(Math.cos(theta), exponent),
+        signedPow(Math.sin(phi), exponent) * signedPow(Math.sin(theta), exponent),
+        signedPow(Math.cos(phi), exponent),
+      ];
+      const normal = normalize(unit.map((value, axis) => signedPow(value, normalExponent) / radii[axis]));
+      geometry.vertex(
+        add(center, unit.map((value, axis) => value * radii[axis])),
+        normal,
+      );
+    }
+  }
+  for (let ring = 0; ring < rings; ring += 1) {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const a = ring * (segments + 1) + segment;
+      const b = a + segments + 1;
+      geometry.quad(a, b, b + 1, a + 1);
+    }
+  }
+  return geometry;
+};
+
+const taperedCylinder = (start, end, radiusStart, radiusEnd, segments = 32) => {
+  const geometry = new Geometry();
+  const axis = normalize(sub(end, start));
+  const reference = Math.abs(axis[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0];
+  const u = normalize(cross(reference, axis));
+  const v = cross(axis, u);
+  const slope = (radiusStart - radiusEnd) / Math.max(1e-6, Math.hypot(...sub(end, start)));
+
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = (index / segments) * TAU;
+    const radial = add(mul(u, Math.cos(angle)), mul(v, Math.sin(angle)));
+    const normal = normalize(add(radial, mul(axis, slope)));
+    geometry.vertex(add(start, mul(radial, radiusStart)), normal);
+    geometry.vertex(add(end, mul(radial, radiusEnd)), normal);
+  }
+  for (let index = 0; index < segments; index += 1) {
+    const a = index * 2;
+    geometry.quad(a, a + 1, a + 3, a + 2);
+  }
+  for (const [point, normal, reverse] of [[start, mul(axis, -1), true], [end, axis, false]]) {
+    const radius = point === start ? radiusStart : radiusEnd;
+    const centerIndex = geometry.vertex(point, normal);
+    const ring = [];
+    for (let index = 0; index <= segments; index += 1) {
+      const angle = (index / segments) * TAU;
+      const radial = add(mul(u, Math.cos(angle)), mul(v, Math.sin(angle)));
+      ring.push(geometry.vertex(add(point, mul(radial, radius)), normal));
+    }
+    for (let index = 0; index < segments; index += 1) {
+      if (reverse) geometry.triangle(centerIndex, ring[index + 1], ring[index]);
+      else geometry.triangle(centerIndex, ring[index], ring[index + 1]);
+    }
+  }
+  return geometry;
+};
+
+const torusZ = (center, major, minor, segments = 40, sides = 10) => {
+  const geometry = new Geometry();
+  for (let segment = 0; segment <= segments; segment += 1) {
+    const theta = (segment / segments) * TAU;
+    for (let side = 0; side <= sides; side += 1) {
+      const phi = (side / sides) * TAU;
+      const radial = major + minor * Math.cos(phi);
+      geometry.vertex(
+        add(center, [radial * Math.cos(theta), radial * Math.sin(theta), minor * Math.sin(phi)]),
+        [Math.cos(phi) * Math.cos(theta), Math.cos(phi) * Math.sin(theta), Math.sin(phi)],
+      );
+    }
+  }
+  for (let segment = 0; segment < segments; segment += 1) {
+    for (let side = 0; side < sides; side += 1) {
+      const a = segment * (sides + 1) + side;
+      const b = a + sides + 1;
+      geometry.quad(a, b, b + 1, a + 1);
+    }
+  }
+  return geometry;
+};
+
+const faceQuad = (geometry, points) => {
+  const normal = normalize(cross(sub(points[1], points[0]), sub(points[3], points[0])));
+  const indices = points.map((point) => geometry.vertex(point, normal));
+  geometry.quad(...indices);
+};
+
+// Pala con cuerda decreciente, flecha y espesor: dos caras aerodinámicas y
+// bordes nítidos, en lugar de dos cubos rectangulares.
+const pala = (side, tip = false) => {
+  const geometry = new Geometry();
+  const all = [
+    [0.028, 0.034, 0.0, 0.012],
+    [0.075, 0.044, 0.004, 0.010],
+    [0.160, 0.036, 0.014, 0.007],
+    [0.205, 0.026, 0.026, 0.005],
+    [0.240, 0.012, 0.038, 0.003],
+  ];
+  const stations = tip ? all.slice(3) : all.slice(0, 4);
+  const rings = stations.map(([radius, chord, sweep, thickness]) => {
+    const x = side * radius;
+    return [
+      [x, sweep - chord / 2, 0],
+      [x, sweep, thickness / 2],
+      [x, sweep + chord / 2, 0],
+      [x, sweep, -thickness / 2],
+    ];
+  });
+  for (let station = 0; station < rings.length - 1; station += 1) {
+    for (let edge = 0; edge < 4; edge += 1) {
+      const next = (edge + 1) % 4;
+      const points = [rings[station][edge], rings[station + 1][edge], rings[station + 1][next], rings[station][next]];
+      faceQuad(geometry, side > 0 ? points : points.toReversed());
+    }
+  }
+  for (const [ring, outward] of [[rings[0], -side], [rings.at(-1), side]]) {
+    const points = [...ring];
+    // El orden del anillo apunta a -x cuando side=1.
+    const ordered = outward < 0 ? points : points.toReversed();
+    faceQuad(geometry, side > 0 ? ordered : ordered.toReversed());
+  }
+  return geometry;
+};
+
+// Dos arcos opuestos con fade angular. Nacen transparentes en el material;
+// COLOR_0 aporta el gradiente sin texturas ni postproceso temporal.
+const estelaGeometry = () => {
+  const geometry = new Geometry();
+  const segments = 24;
+  for (const base of [0, Math.PI]) {
+    const start = geometry.positions.length / 3;
+    for (let index = 0; index <= segments; index += 1) {
+      const t = index / segments;
+      const angle = base - t * 1.05;
+      const alpha = (1 - t) ** 1.8;
+      for (const radius of [0.052, 0.24]) {
+        geometry.vertexColor(
+          [Math.cos(angle) * radius, Math.sin(angle) * radius, 0.006],
+          [0, 0, 1],
+          [0.45, 0.85, 1, alpha],
+        );
+      }
+    }
+    for (let index = 0; index < segments; index += 1) {
+      const a = start + index * 2;
+      geometry.quad(a, a + 1, a + 3, a + 2);
+    }
+  }
+  return geometry;
+};
+
 const materials = [
-  // Materiales claros: un dron de reparto real es gris/blanco. Los valores
-  // anteriores (0.025 de albedo, 0.65 metálico) se veían negros sin un mapa de
-  // entorno IBL, que es justo lo que Cesium no trae por defecto.
-  { name: "Carbono", color: [0.16, 0.18, 0.21, 1], metallic: 0.3, roughness: 0.5 },
-  { name: "Carcasa", color: [0.62, 0.65, 0.68, 1], metallic: 0.12, roughness: 0.45 },
-  { name: "Metal", color: [0.55, 0.58, 0.62, 1], metallic: 0.55, roughness: 0.35 },
-  { name: "Acento", color: [0.04, 0.62, 0.86, 1], metallic: 0.2, roughness: 0.3 },
-  { name: "Paquete", color: [0.68, 0.31, 0.075, 1], metallic: 0, roughness: 0.82 },
+  // Bloques de color anime + metal estilizado. Los focos superan 1 para que
+  // el Bloom HDR del desktop los trate como luces, no como superficies blancas.
+  { name: "Carbono", color: [0.12, 0.15, 0.20, 1], metallic: 0.45, roughness: 0.32 },
+  { name: "Carcasa", color: [0.72, 0.78, 0.86, 1], metallic: 0.35, roughness: 0.28 },
+  { name: "Metal", color: [0.55, 0.62, 0.72, 1], metallic: 0.85, roughness: 0.20 },
+  { name: "Acento", color: [0.03, 0.45, 0.85, 1], metallic: 0.35, roughness: 0.24 },
+  { name: "Paquete", color: [0.85, 0.28, 0.04, 1], metallic: 0.10, roughness: 0.45 },
   { name: "Correas", color: [0.12, 0.065, 0.025, 1], metallic: 0, roughness: 0.9 },
-  { name: "Lente", color: [0.008, 0.015, 0.025, 1], metallic: 0.35, roughness: 0.08 },
-  { name: "Rojo", color: [0.85, 0.025, 0.02, 1], metallic: 0.1, roughness: 0.25, emissive: [0.8, 0.01, 0.01] },
-  { name: "Verde", color: [0.02, 0.8, 0.22, 1], metallic: 0.1, roughness: 0.25, emissive: [0.01, 0.75, 0.12] },
-  { name: "Blanco", color: [0.85, 0.92, 1, 1], metallic: 0.1, roughness: 0.2, emissive: [0.7, 0.8, 1] },
+  { name: "Lente", color: [0.008, 0.02, 0.04, 1], metallic: 0.60, roughness: 0.08 },
+  { name: "Rojo", color: [0.85, 0.025, 0.02, 1], metallic: 0.1, roughness: 0.25, emissive: [2.2, 0.02, 0.01] },
+  { name: "Verde", color: [0.02, 0.8, 0.22, 1], metallic: 0.1, roughness: 0.25, emissive: [0.02, 2.0, 0.25] },
+  { name: "Blanco", color: [0.85, 0.92, 1, 1], metallic: 0.1, roughness: 0.2, emissive: [2.4, 2.8, 3.2] },
+  { name: "Cian", color: [0.05, 0.75, 1, 1], metallic: 0.15, roughness: 0.2, emissive: [0.05, 1.6, 2.2] },
+  { name: "Estela", color: [0.25, 0.75, 1, 0], metallic: 0, roughness: 0.5, emissive: [0.05, 0.35, 0.55], blend: true, doubleSided: true },
 ];
 const materialIndex = Object.fromEntries(materials.map((material, index) => [material.name, index]));
 const staticParts = new Map();
@@ -150,14 +320,34 @@ const append = (target, material, geometry) => {
 };
 const part = (material, geometry) => append(staticParts, material, geometry);
 
-part("Carcasa", box([0, 0, 0], [0.62, 0.43, 0.13]));
-part("Carcasa", ellipsoid([0, -0.015, 0.075], [0.28, 0.215, 0.085]));
-part("Acento", box([0, 0.216, 0.045], [0.18, 0.025, 0.055]));
-part("Carbono", box([0, -0.02, 0.14], [0.3, 0.21, 0.06]));
-part("Carbono", box([0, -0.02, 0.174], [0.315, 0.035, 0.018]));
-part("Metal", cylinder([-0.07, -0.12, 0.17], [-0.07, -0.12, 0.205], 0.035, 16));
-part("Carbono", cylinder([0.1, -0.16, 0.08], [0.15, -0.31, 0.3], 0.008, 8));
-part("Blanco", ellipsoid([0.15, -0.31, 0.3], [0.012, 0.012, 0.012], 10, 6));
+// Casco y paneles: volúmenes supercuadráticos con normales suaves. Todos los
+// detalles se fusionan por material dentro de Estructura, sin textos ni decals.
+part("Carcasa", superellipsoid([0, 0, 0], [0.32, 0.235, 0.10], 0.62, 48, 24));
+part("Carcasa", superellipsoid([0, -0.015, 0.072], [0.275, 0.205, 0.075], 0.78, 40, 20));
+part("Carbono", superellipsoid([0, -0.01, 0.125], [0.23, 0.16, 0.035], 0.65, 40, 16));
+part("Carcasa", superellipsoid([0, 0.005, 0.143], [0.18, 0.12, 0.018], 0.60, 32, 12));
+part("Acento", box([0, 0.02, 0.164], [0.025, 0.19, 0.006]));
+for (const y of [-0.08, 0.08]) {
+  part("Carbono", box([0, y, 0.158], [0.26, 0.004, 0.005]));
+}
+for (const side of [-1, 1]) {
+  part("Carbono", box([side * 0.17, 0, 0.103], [0.005, 0.20, 0.006]));
+}
+
+// Visor panorámico: marco metálico, cristal oscuro y dos focos cyan estrechos.
+part("Metal", superellipsoid([0, 0.216, 0.025], [0.218, 0.022, 0.063], 0.65, 40, 18));
+part("Lente", superellipsoid([0, 0.231, 0.027], [0.202, 0.012, 0.050], 0.65, 40, 18));
+for (const side of [-1, 1]) {
+  part("Cian", ellipsoid([side * 0.102, 0.242, 0.037], [0.050, 0.006, 0.009], 24, 12));
+}
+part("Acento", superellipsoid([0, 0.235, -0.035], [0.055, 0.015, 0.018], 0.7, 28, 12));
+
+// Ventilaciones laterales limpias, agrupadas y alineadas con el casco.
+for (const side of [-1, 1]) {
+  for (let index = 0; index < 5; index += 1) {
+    part("Carbono", box([side * 0.318, -0.075 + index * 0.034, 0.012], [0.007, 0.021, 0.033]));
+  }
+}
 
 const motors = [];
 for (const sx of [-1, 1]) {
@@ -165,58 +355,69 @@ for (const sx of [-1, 1]) {
     const x = sx * 0.34;
     const y = sy * 0.34;
     motors.push([x, y, 0.15]);
-    part("Carbono", cylinder([sx * 0.18, sy * 0.14, 0], [x, y, 0.025], 0.032));
-    part("Metal", cylinder([x, y, 0.015], [x, y, 0.105], 0.058, 18));
-    part("Carcasa", cylinder([x, y, 0.102], [x, y, 0.13], 0.064, 18));
-    part("Acento", cylinder([x, y, 0.13], [x, y, 0.137], 0.037, 16));
-    part("Carbono", cylinder([sx * 0.17, sy * 0.15, -0.065], [sx * 0.27, sy * 0.25, -0.3], 0.018, 10));
-    part(sx < 0 ? "Rojo" : "Verde", ellipsoid([sx * 0.325, sy * 0.325, 0.055], [0.022, 0.022, 0.018], 12, 8));
+    part("Carcasa", taperedCylinder([sx * 0.17, sy * 0.14, 0.005], [x, y, 0.03], 0.048, 0.030, 32));
+    part("Metal", taperedCylinder([x, y, 0.005], [x, y, 0.095], 0.052, 0.060, 36));
+    part("Carcasa", ellipsoid([x, y, 0.096], [0.061, 0.061, 0.034], 32, 16));
+    part("Carcasa", cylinder([x, y, 0.105], [x, y, 0.132], 0.058, 36));
+    part("Acento", torusZ([x, y, 0.122], 0.058, 0.006, 40, 10));
+    part("Metal", cylinder([x, y, 0.132], [x, y, 0.145], 0.028, 32));
+    for (let bolt = 0; bolt < 6; bolt += 1) {
+      const angle = (bolt / 6) * TAU;
+      const bx = x + Math.cos(angle) * 0.045;
+      const by = y + Math.sin(angle) * 0.045;
+      part("Carbono", cylinder([bx, by, 0.133], [bx, by, 0.141], 0.004, 8));
+    }
+    part("Carbono", taperedCylinder([sx * 0.17, sy * 0.15, -0.055], [sx * 0.27, sy * 0.25, -0.285], 0.020, 0.014, 24));
+    part(sx < 0 ? "Rojo" : "Verde", ellipsoid([sx * 0.393, sy * 0.34, 0.075], [0.014, 0.018, 0.014], 20, 12));
   }
 }
 for (const side of [-1, 1]) {
-  part("Carbono", cylinder([side * 0.27, -0.31, -0.3], [side * 0.27, 0.31, -0.3], 0.023, 12));
-  part("Metal", cylinder([side * 0.27, 0.27, -0.3], [side * 0.27, 0.33, -0.285], 0.024, 12));
+  part("Metal", cylinder([side * 0.27, -0.31, -0.3], [side * 0.27, 0.31, -0.3], 0.023, 24));
+  for (const y of [-0.31, 0.31]) {
+    part("Carbono", ellipsoid([side * 0.27, y, -0.3], [0.027, 0.027, 0.026], 20, 12));
+    part("Acento", ellipsoid([side * 0.27, y, -0.285], [0.024, 0.024, 0.010], 20, 10));
+  }
 }
 
-part("Carcasa", ellipsoid([0, 0.19, -0.11], [0.075, 0.075, 0.07], 18, 12));
-part("Metal", cylinder([0, 0.22, -0.11], [0, 0.285, -0.11], 0.044, 18));
-part("Lente", cylinder([0, 0.285, -0.11], [0, 0.3, -0.11], 0.035, 18));
-part("Acento", ellipsoid([0, 0.303, -0.11], [0.016, 0.005, 0.016], 12, 8));
+// Batería trasera de reparto, con correas y testigo; el paquete real sigue
+// fuera del GLB (MissionDirector lo transfiere como entidad propia).
+part("Paquete", superellipsoid([0, -0.135, 0.17], [0.115, 0.075, 0.045], 0.55, 36, 18));
+for (const side of [-1, 1]) {
+  part("Correas", box([side * 0.055, -0.135, 0.212], [0.014, 0.13, 0.008]));
+}
+part("Cian", ellipsoid([0, -0.208, 0.17], [0.018, 0.006, 0.009], 20, 10));
+part("Carbono", cylinder([0.1, -0.16, 0.18], [0.15, -0.31, 0.3], 0.007, 16));
+part("Blanco", ellipsoid([0.15, -0.31, 0.3], [0.012, 0.012, 0.012], 16, 10));
 
-// El paquete ya NO vive dentro del GLB: lo dibuja MissionDirector como una
-// entidad propia para poder transferirlo del repartidor al dron y al receptor.
-// Aquí solo queda el anclaje inferior del fuselaje.
+// Cardán delantero integrado bajo el visor.
+part("Carcasa", ellipsoid([0, 0.19, -0.11], [0.075, 0.075, 0.07], 28, 16));
+part("Metal", cylinder([0, 0.22, -0.11], [0, 0.285, -0.11], 0.044, 32));
+part("Lente", cylinder([0, 0.285, -0.11], [0, 0.3, -0.11], 0.035, 32));
+part("Cian", ellipsoid([0, 0.303, -0.11], [0.016, 0.005, 0.016], 20, 10));
+
 part("Metal", box([0, -0.02, -0.205], [0.2, 0.16, 0.03]));
-part("Blanco", ellipsoid([0, -0.235, 0.035], [0.018, 0.014, 0.014], 12, 8));
+part("Blanco", ellipsoid([0, -0.235, 0.035], [0.018, 0.014, 0.014], 20, 12));
 
-// Estrobo trasero: nodo y malla propios para parpadearlo por código (el
-// escritorio no evalúa animaciones de glTF; la web sí las reproduce vía Cesium).
-const estroboGeom = ellipsoid([0, -0.185, 0.085], [0.02, 0.02, 0.02], 10, 6);
+// Estrobo trasero: nodo y malla propios para parpadearlo por código.
+const estroboGeom = ellipsoid([0, -0.225, 0.09], [0.018, 0.018, 0.018], 24, 14);
 
-const rotor = new Geometry();
-rotor.positions.push(...box([0.135, 0, 0], [0.21, 0.028, 0.007]).positions);
-rotor.normals.push(...box([0.135, 0, 0], [0.21, 0.028, 0.007]).normals);
-rotor.indices.push(...box([0.135, 0, 0], [0.21, 0.028, 0.007]).indices);
-const secondBlade = box([-0.135, 0, 0], [0.21, 0.028, 0.007]);
-const secondOffset = rotor.positions.length / 3;
-rotor.positions.push(...secondBlade.positions);
-rotor.normals.push(...secondBlade.normals);
-rotor.indices.push(...secondBlade.indices.map((index) => index + secondOffset));
-const hub = cylinder([0, 0, -0.012], [0, 0, 0.018], 0.025, 14);
-const hubOffset = rotor.positions.length / 3;
-rotor.positions.push(...hub.positions);
-rotor.normals.push(...hub.normals);
-rotor.indices.push(...hub.indices.map((index) => index + hubOffset));
-append(rotorParts, "Carbono", rotor);
+for (const side of [-1, 1]) {
+  append(rotorParts, "Carbono", pala(side));
+  append(rotorParts, "Cian", pala(side, true));
+}
+append(rotorParts, "Metal", cylinder([0, 0, -0.012], [0, 0, 0.018], 0.026, 32));
+append(rotorParts, "Acento", torusZ([0, 0, 0.018], 0.022, 0.004, 32, 8));
+const estelaParts = new Map([["Estela", estelaGeometry()]]);
 
 const gltf = {
   asset: { version: "2.0", generator: "UTS-UIS procedural delivery drone" },
   scene: 0,
-  scenes: [{ nodes: [0, 1, 2, 3, 4, 5] }],
+  scenes: [{ nodes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] }],
   nodes: [
     { name: "DronReparto", mesh: 0 },
     ...motors.map((position, index) => ({ name: `Rotor${index + 1}`, mesh: 1, translation: position })),
     { name: "Strobe", mesh: 2 },
+    ...motors.map((position, index) => ({ name: `Estela${index + 1}`, mesh: 3, translation: position })),
   ],
   meshes: [],
   materials: materials.map((material) => ({
@@ -227,7 +428,8 @@ const gltf = {
       roughnessFactor: material.roughness,
     },
     ...(material.emissive ? { emissiveFactor: material.emissive } : {}),
-    doubleSided: false,
+    ...(material.blend ? { alphaMode: "BLEND" } : {}),
+    doubleSided: material.doubleSided ?? false,
   })),
   accessors: [],
   bufferViews: [],
@@ -275,11 +477,18 @@ const addAccessor = (values, type, componentType, includeBounds = false) => {
 const addMesh = (name, parts) => {
   const primitives = [];
   for (const [material, geometry] of parts) {
+    const attributes = {
+      POSITION: addAccessor(geometry.positions, "VEC3", 5126, true),
+      NORMAL: addAccessor(geometry.normals, "VEC3", 5126),
+    };
+    if (geometry.colors.length > 0) {
+      if (geometry.colors.length / 4 !== geometry.positions.length / 3) {
+        throw new Error(`${name}/${material}: COLOR_0 no tiene un color por vértice`);
+      }
+      attributes.COLOR_0 = addAccessor(geometry.colors, "VEC4", 5126);
+    }
     primitives.push({
-      attributes: {
-        POSITION: addAccessor(geometry.positions, "VEC3", 5126, true),
-        NORMAL: addAccessor(geometry.normals, "VEC3", 5126),
-      },
+      attributes,
       indices: addAccessor(geometry.indices, "SCALAR", 5125),
       material: materialIndex[material],
       mode: 4,
@@ -293,6 +502,7 @@ const addMesh = (name, parts) => {
 addMesh("Estructura", staticParts);
 addMesh("Aspas", rotorParts);
 addMesh("Estrobo", new Map([["Blanco", estroboGeom]]));
+addMesh("Estela", estelaParts);
 
 const times = addAccessor([0, 0.25, 0.5, 0.75, 1], "SCALAR", 5126);
 const channels = [];
